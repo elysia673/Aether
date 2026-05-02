@@ -1,10 +1,7 @@
-// Package main 是 Aether 客户端入口
-//
-// 客户端连接到 Aether 服务端，注册身份并建立隧道。
-// 支持 TCP 和 WebSocket 两种隧道模式，自动重连。
 package main
 
 import (
+	"Aether/pkg/config"
 	"flag"
 	"log"
 	"os"
@@ -14,41 +11,21 @@ import (
 	"time"
 )
 
-// 全局配置变量
-var (
-	serverURL      = os.Getenv("AETHER_WS_URL") // 服务端 WebSocket 地址
-	reconnectDelay = 5 * time.Second            // 重连延迟
-	useHTTP        bool                         // 是否使用 HTTP 模式
-)
-
-func init() {
-	if serverURL == "" {
-		serverURL = "wss://your-server.com:9909/ws"
-	}
-}
-
 func main() {
-	// 解析命令行参数
-	var clientID string
-	flag.StringVar(&clientID, "id", "raspberry-pi-01", "Client ID for identification")
-	flag.BoolVar(&useHTTP, "http", false, "Use HTTP/WS instead of HTTPS/WSS")
+	configPath := flag.String("config", "client.json", "path to config file")
 	flag.Parse()
 
-	// HTTP 模式下切换协议
-	if useHTTP {
-		serverURL = strings.Replace(serverURL, "wss://", "ws://", 1)
+	cfg, err := config.LoadClient(*configPath)
+	if err != nil {
+		log.Fatalf("load config: %v", err)
 	}
 
-	// 验证客户端令牌
-	clientToken := os.Getenv("AETHER_CLIENT_TOKEN")
-	if clientToken == "" {
-		log.Fatal("AETHER_CLIENT_TOKEN environment variable is required")
+	if cfg.UseHTTP {
+		cfg.ServerURL = strings.Replace(cfg.ServerURL, "wss://", "ws://", 1)
 	}
 
-	// 创建客户端
-	client := NewClient(serverURL, clientID, clientToken)
+	client := NewClient(cfg.ServerURL, cfg.ClientID, cfg.ClientToken, cfg.UseHTTP, cfg.TLSSNI, cfg.Origin, time.Duration(cfg.ReconnectDelaySeconds)*time.Second)
 
-	// 注册信号处理
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
@@ -57,6 +34,5 @@ func main() {
 		client.Stop()
 	}()
 
-	// 启动客户端（自动重连）
 	client.Run()
 }

@@ -1,7 +1,7 @@
 package handler
 
 import (
-	"Aether/Server/model"
+	"Aether/pkg/model"
 	"net/http"
 	"strconv"
 

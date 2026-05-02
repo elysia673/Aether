@@ -10,6 +10,11 @@ type RegisterData struct {
 	Token    string `json:"token"`
 }
 
+type RegisteredData struct {
+	ClientID   string `json:"client_id"`
+	ServerHost string `json:"server_host"`
+}
+
 type CommandData struct {
 	RequestID  string `json:"request_id"`
 	RemotePort int    `json:"remote_port,omitempty"`
@@ -18,7 +23,7 @@ type CommandData struct {
 	BindAddr   string `json:"bind_addr,omitempty"`
 	Command    string `json:"command,omitempty"`
 	ServerHost string `json:"server_host,omitempty"`
-	TunnelPort int    `json:"tunnel_port,omitempty"` // 隧道端口
+	TunnelPort int    `json:"tunnel_port,omitempty"`
 	Token      string `json:"token,omitempty"`
 	LocalIP    string `json:"local_ip,omitempty"`
 }
@@ -28,21 +33,40 @@ type ErrorData struct {
 	Message string `json:"message"`
 }
 
-// 下行命令：请求端口列表
+type ProxyClosedData struct {
+	Key string `json:"key"`
+}
+
 type ListPortsCmd struct {
 	RequestID string `json:"request_id"`
 }
 
-// 单个端口信息
 type PortInfo struct {
-	Protocol string `json:"protocol"` // "tcp" 或 "udp"
+	Protocol string `json:"protocol"`
 	Port     int    `json:"port"`
-	Process  string `json:"process,omitempty"` // 可选，进程名
+	Process  string `json:"process,omitempty"`
 }
 
-// 上行响应：端口列表数据
 type PortsListData struct {
 	RequestID string     `json:"request_id"`
 	Ports     []PortInfo `json:"ports"`
 	Error     string     `json:"error,omitempty"`
+}
+
+type TunnelAuthMsg struct {
+	Type string         `json:"type"`
+	Data TunnelAuthData `json:"data"`
+}
+
+type TunnelAuthData struct {
+	Token string `json:"token"`
+}
+
+type TunnelReadyMsg struct {
+	Type string          `json:"type"`
+	Data TunnelReadyData `json:"data"`
+}
+
+type TunnelReadyData struct {
+	Status string `json:"status"`
 }

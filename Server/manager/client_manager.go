@@ -4,7 +4,7 @@
 package manager
 
 import (
-	"Aether/Server/model"
+	"Aether/pkg/model"
 	"errors"
 	"fmt"
 	"net"

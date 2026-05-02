@@ -1,15 +1,13 @@
 package main
 
 import (
+	"Aether/pkg/model"
 	"net/url"
-	"os"
 )
 
-// tlsServerName 从 serverURL 解析 TLS SNI 主机名
-// 可通过 AETHER_TLS_SNI 环境变量覆盖
-func tlsServerName(serverURL string) string {
-	if host := os.Getenv("AETHER_TLS_SNI"); host != "" {
-		return host
+func tlsServerName(serverURL, override string) string {
+	if override != "" {
+		return override
 	}
 	u, err := url.Parse(serverURL)
 	if err != nil {
@@ -18,13 +16,11 @@ func tlsServerName(serverURL string) string {
 	return u.Hostname()
 }
 
-// originHeader 从 serverURL 构造 Origin 请求头
-// 可通过 AETHER_ORIGIN 环境变量覆盖
-func originHeader(serverURL string) string {
-	if origin := os.Getenv("AETHER_ORIGIN"); origin != "" {
-		return origin
+func originHeader(serverURL string, useHTTP bool, override string) string {
+	if override != "" {
+		return override
 	}
-	host := tlsServerName(serverURL)
+	host := tlsServerName(serverURL, "")
 	if host == "" {
 		return ""
 	}
@@ -34,17 +30,12 @@ func originHeader(serverURL string) string {
 	return "https://" + host
 }
 
-// DeduplicatePorts 按端口号去重
-func DeduplicatePorts(ports []map[string]interface{}) []map[string]interface{} {
+func DeduplicatePorts(ports []model.PortInfo) []model.PortInfo {
 	seen := make(map[int]bool)
-	result := make([]map[string]interface{}, 0, len(ports))
+	result := make([]model.PortInfo, 0, len(ports))
 	for _, p := range ports {
-		port, ok := p["port"].(int)
-		if !ok {
-			continue
-		}
-		if !seen[port] {
-			seen[port] = true
+		if !seen[p.Port] {
+			seen[p.Port] = true
 			result = append(result, p)
 		}
 	}

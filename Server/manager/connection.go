@@ -1,7 +1,7 @@
 package manager
 
 import (
-	"Aether/Server/model"
+	"Aether/pkg/model"
 	"encoding/json"
 	"fmt"
 	"log"

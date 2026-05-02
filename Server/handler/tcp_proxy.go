@@ -93,7 +93,7 @@ func handleTCPConnection(conn net.Conn, key string, token string, table *manager
 			log.Printf("Multiplexer created for %s", key)
 
 			<-mx.Done()
-			table.RemoveMux(key)
+			table.RemoveMux(key, mx)
 			log.Printf("Multiplexer closed for %s", key)
 			return
 		}

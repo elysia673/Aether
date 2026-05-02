@@ -5,12 +5,12 @@
 package main
 
 import (
-	"Aether/Server/config"
 	"Aether/Server/handler"
 	"Aether/Server/manager"
 	"Aether/Server/middleware"
-	"Aether/Server/model"
 	"Aether/Server/storage"
+	"Aether/pkg/config"
+	"Aether/pkg/model"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
@@ -91,7 +91,7 @@ func generateToken() string {
 }
 
 // getTunnelHost 获取隧道主机地址
-func getTunnelHost(cfg *config.Config, table *manager.ClientTable) string {
+func getTunnelHost(cfg *config.ServerConfig, table *manager.ClientTable) string {
 	serverHost := table.Host()
 	if serverHost == "" {
 		if cfg.Server.Domain != "" {
@@ -104,7 +104,7 @@ func getTunnelHost(cfg *config.Config, table *manager.ClientTable) string {
 }
 
 // restoreClientProxies 恢复客户端代理配置
-func restoreClientProxies(cfg *config.Config, clientMgr *manager.ClientManager, store *storage.Storage, h *handler.APIHandler) func(string, *manager.Connection) {
+func restoreClientProxies(cfg *config.ServerConfig, clientMgr *manager.ClientManager, store *storage.Storage, h *handler.APIHandler) func(string, *manager.Connection) {
 	return func(clientID string, conn *manager.Connection) {
 		proxies := store.GetByClient(clientID)
 		if len(proxies) == 0 {
@@ -152,6 +152,7 @@ func restoreClientProxies(cfg *config.Config, clientMgr *manager.ClientManager, 
 				table.StoreWSToken(token, fmt.Sprintf("%s-%d", clientID, p.RemotePort))
 				go h.StartWSProxy(p.RemotePort, p.BindAddr, table, token)
 			} else {
+				table.StoreTunnelToken(token, fmt.Sprintf("%s-%d", clientID, p.RemotePort))
 				go h.StartTCPProxy(p.RemotePort, p.BindAddr, table, token)
 			}
 
@@ -166,7 +167,7 @@ func main() {
 	flag.Parse()
 
 	// 加载配置文件
-	cfg, err := config.Load(*configPath)
+	cfg, err := config.LoadServer(*configPath)
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
