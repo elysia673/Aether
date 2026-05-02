@@ -3,57 +3,82 @@ package manager
 import (
 	"Aether/Server/model"
 	"encoding/json"
+	"fmt"
 	"log"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
+// WebSocket 心跳和消息大小常量
 const (
-	writeWait      = 10 * time.Second
-	pongWait       = 40 * time.Second
-	pingPeriod     = 30 * time.Second
-	maxMessageSize = 65536
+	writeWait      = 10 * time.Second // 写超时
+	pongWait       = 40 * time.Second // 等待 pong 超时
+	pingPeriod     = 30 * time.Second // 发送 ping 间隔
+	maxMessageSize = 65536            // 最大消息大小
 )
 
+// Connection 封装 WebSocket 连接
+//
+// 提供并发安全的读写、心跳检测和自动重连支持。
+// 使用 writePump/readPump 模式处理消息收发。
 type Connection struct {
 	wsConn      *websocket.Conn
 	clientID    string
-	send        chan []byte
+	table       *ClientTable
+	host        string
+	remoteIP    string
+	send        chan []byte   // 发送缓冲区
+	done        chan struct{} // 关闭信号
 	manager     *ClientManager
-	tunnelMgr   *TunnelManager
-	registered  bool
+	registered  bool // 是否已注册
 	mu          sync.RWMutex
 	closeOnce   sync.Once
 	connectedAt time.Time
 }
 
-func NewConnection(wsConn *websocket.Conn, mgr *ClientManager, tunnelMgr *TunnelManager) *Connection {
+// NewConnection 创建新的 WebSocket 连接封装
+func NewConnection(wsConn *websocket.Conn, mgr *ClientManager) *Connection {
 	return &Connection{
 		wsConn:      wsConn,
 		manager:     mgr,
-		tunnelMgr:   tunnelMgr,
 		send:        make(chan []byte, 256),
+		done:        make(chan struct{}),
 		connectedAt: time.Now(),
 	}
 }
 
-// 启动读写协程
+// Start 启动读写协程和注册超时检测
 func (c *Connection) Start() {
 	go c.writePump()
 	go c.readPump()
+
+	go func() {
+		time.Sleep(30 * time.Second)
+		if !c.IsRegistered() {
+			log.Println("client registration timeout, closing connection")
+			c.Close()
+		}
+	}()
 }
 
-// 读协程：处理来自 Client 的消息
+// readPump 读取 WebSocket 消息
+//
+// 负责：
+// - 设置读限制和 pong 处理器
+// - 读取并解析消息
+// - 分发到对应处理器
 func (c *Connection) readPump() {
 	defer c.Close()
 
 	c.wsConn.SetReadLimit(maxMessageSize)
-	c.wsConn.SetReadDeadline(time.Now().Add(pongWait))
+	if err := c.wsConn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
+		log.Printf("set initial read deadline error: %v", err)
+	}
 	c.wsConn.SetPongHandler(func(string) error {
-		c.wsConn.SetReadDeadline(time.Now().Add(pongWait))
-		return nil
+		return c.wsConn.SetReadDeadline(time.Now().Add(pongWait))
 	})
 
 	for {
@@ -75,47 +100,44 @@ func (c *Connection) readPump() {
 	}
 }
 
-// 处理收到的消息
 func (c *Connection) handleMessage(msg *model.WSMessage) {
 	switch msg.Type {
 	case "register":
 		c.handleRegister(msg.Data)
 	case "response":
-		// 处理命令响应，例如日志记录或转发给 HTTP 请求方
 		log.Printf("client %s response: %+v", c.clientID, msg.Data)
 	case "ports_list":
 		var portsData model.PortsListData
-		b, _ := json.Marshal(msg.Data)
-		json.Unmarshal(b, &portsData)
+		b, err := json.Marshal(msg.Data)
+		if err != nil {
+			log.Printf("ports_list marshal error: %v", err)
+			return
+		}
+		if err := json.Unmarshal(b, &portsData); err != nil {
+			log.Printf("ports_list unmarshal error: %v", err)
+			return
+		}
 
-		// 找到对应的等待通道
 		if ch, ok := c.manager.GetPendingRequest(portsData.RequestID); ok {
 			ch <- &portsData
 			c.manager.UnregisterPendingRequest(portsData.RequestID)
 		}
-	case "tunnel_data":
-		var data struct {
-			TunnelID string `json:"tunnel_id"`
-			Data     []byte `json:"data"`
-		}
-		b, _ := json.Marshal(msg.Data)
-		json.Unmarshal(b, &data)
-
-		tunnel, ok := c.tunnelMgr.Get(data.TunnelID) // ✅ 使用 c.tunnelMgr
-		if !ok {
-			return
-		}
-		_, err := tunnel.Conn.Write(data.Data)
-		if err != nil {
-			log.Printf("tunnel %s write to public conn error: %v", data.TunnelID, err)
-			tunnel.Conn.Close()
-			c.tunnelMgr.Remove(data.TunnelID) // ✅ 使用 c.tunnelMgr
-		}
 	case "pong":
-		// 客户端响应心跳，仅作日志或忽略
 	default:
 		log.Printf("unknown message type: %s", msg.Type)
 	}
+}
+
+func (c *Connection) getRemoteIP() string {
+	addr := c.wsConn.RemoteAddr()
+	if tcpAddr, ok := addr.(*net.TCPAddr); ok {
+		return tcpAddr.IP.String()
+	}
+	host, _, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return addr.String()
+	}
+	return host
 }
 
 func (c *Connection) handleRegister(data interface{}) {
@@ -128,7 +150,11 @@ func (c *Connection) handleRegister(data interface{}) {
 			return
 		}
 	default:
-		b, _ := json.Marshal(data)
+		b, err := json.Marshal(data)
+		if err != nil {
+			c.sendError(400, "invalid register data")
+			return
+		}
 		if err := json.Unmarshal(b, &reg); err != nil {
 			c.sendError(400, "invalid register data")
 			return
@@ -147,33 +173,66 @@ func (c *Connection) handleRegister(data interface{}) {
 	}
 
 	if old, exists := c.manager.Get(reg.ClientID); exists {
-		old.Close()
+		old.Conn().Close()
 	}
 
+	c.mu.Lock()
 	c.clientID = reg.ClientID
 	c.registered = true
-	c.manager.Add(reg.ClientID, c)
+	c.remoteIP = c.getRemoteIP()
+	c.mu.Unlock()
 
-	respData, _ := json.Marshal(map[string]string{"client_id": reg.ClientID})
+	table := NewClientTable(reg.ClientID, c, c.remoteIP, c.connectedAt.Unix(), c.host)
+	c.table = table
+	c.manager.Add(reg.ClientID, table)
+
+	serverHost := c.GetHost()
+	if serverHost == "" {
+		serverHost = c.remoteIP
+	}
+	respData, err := json.Marshal(map[string]string{
+		"client_id":   reg.ClientID,
+		"server_host": serverHost,
+	})
+	if err != nil {
+		log.Printf("marshal registered response error: %v", err)
+		return
+	}
 	resp := model.WSMessage{
 		Type: "registered",
 		Data: string(respData),
 	}
-	c.WriteJSON(&resp)
+	if err := c.WriteJSON(&resp); err != nil {
+		log.Printf("write registered response error: %v", err)
+		return
+	}
 
-	log.Printf("client %s registered", reg.ClientID)
+	log.Printf("client %s registered, server_host=%s", reg.ClientID, serverHost)
+
+	// 触发客户端注册完成回调
+	c.manager.OnClientReady(reg.ClientID, c)
 }
 
 func (c *Connection) sendError(code int, message string) {
-	errData, _ := json.Marshal(model.ErrorData{Code: code, Message: message})
+	errData, err := json.Marshal(model.ErrorData{Code: code, Message: message})
+	if err != nil {
+		log.Printf("marshal error response error: %v", err)
+		return
+	}
 	errMsg := model.WSMessage{
 		Type: "error",
 		Data: string(errData),
 	}
-	c.WriteJSON(&errMsg)
+	if err := c.WriteJSON(&errMsg); err != nil {
+		log.Printf("write error response error: %v", err)
+	}
 }
 
-// 写协程：将 send 队列中的数据发送到 WebSocket
+// writePump 写入 WebSocket 消息
+//
+// 负责：
+// - 从 send 通道取消息并发送
+// - 定期发送 ping 保持连接
 func (c *Connection) writePump() {
 	ticker := time.NewTicker(pingPeriod)
 	defer func() {
@@ -201,26 +260,30 @@ func (c *Connection) writePump() {
 	}
 }
 
-// 写 JSON 消息到发送队列
-func (c *Connection) WriteJSON(v interface{}) error {
+func (c *Connection) WriteJSON(v interface{}) (err error) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
 	select {
 	case c.send <- data:
-	default:
-		// 发送队列满，关闭连接
-		return c.Close()
+	case <-c.done:
+		return fmt.Errorf("connection closed")
 	}
 	return nil
 }
 
-// 关闭连接并从管理器移除
 func (c *Connection) Close() error {
 	c.closeOnce.Do(func() {
-		if c.clientID != "" {
-			c.manager.Remove(c.clientID)
+		close(c.done)
+
+		c.mu.Lock()
+		clientID := c.clientID
+		c.registered = false
+		c.mu.Unlock()
+
+		if clientID != "" {
+			c.manager.Remove(clientID)
 		}
 		close(c.send)
 		c.wsConn.Close()
@@ -242,4 +305,38 @@ func (c *Connection) GetInfo() ClientInfo {
 		RemoteAddr:  c.wsConn.RemoteAddr().String(),
 		ConnectedAt: c.connectedAt.Unix(),
 	}
+}
+
+func (c *Connection) GetRemoteAddr() string {
+	return c.wsConn.RemoteAddr().String()
+}
+
+func (c *Connection) SetHost(host string) {
+	c.mu.Lock()
+	c.host = host
+	c.mu.Unlock()
+}
+
+func (c *Connection) GetHost() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.host
+}
+
+func (c *Connection) GetTunnelHost() string {
+	host := c.GetHost()
+	if host == "" {
+		host = c.manager.GetPublicIP()
+	}
+	return host
+}
+
+func (c *Connection) GetRemoteIP() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.remoteIP
+}
+
+func (c *Connection) Table() *ClientTable {
+	return c.table
 }

@@ -14,7 +14,13 @@ type CommandData struct {
 	RequestID  string `json:"request_id"`
 	RemotePort int    `json:"remote_port,omitempty"`
 	LocalPort  int    `json:"local_port,omitempty"`
+	Protocol   string `json:"protocol,omitempty"`
+	BindAddr   string `json:"bind_addr,omitempty"`
 	Command    string `json:"command,omitempty"`
+	ServerHost string `json:"server_host,omitempty"`
+	TunnelPort int    `json:"tunnel_port,omitempty"` // 隧道端口
+	Token      string `json:"token,omitempty"`
+	LocalIP    string `json:"local_ip,omitempty"`
 }
 
 type ErrorData struct {

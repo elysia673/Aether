@@ -1,40 +1,41 @@
+// Package handler 提供 HTTP/WebSocket 请求处理
+//
+// 包含 API 接口、WebSocket 连接管理和代理隧道处理。
 package handler
 
 import (
 	"Aether/Server/manager"
 	"Aether/Server/model"
+	"Aether/Server/storage"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
-	"net"
+	"fmt"
 	"net/http"
 	"strconv"
-	"sync"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
-// APIHandler API处理器
+// APIHandler 处理 REST API 请求
 type APIHandler struct {
-	clientMgr      *manager.ClientManager
-	tunnelMgr      *manager.TunnelManager
-	proxyPortMap   map[int]int // remotePort -> localPort
-	proxyPortLock  sync.RWMutex
-	proxyListeners map[int]net.Listener // remotePort -> listener，便于关闭
-	listenerLock   sync.Mutex
+	clientMgr  *manager.ClientManager // 客户端管理器
+	domain     string                 // 公网域名
+	tunnelPort int                    // 隧道端口
+	store      *storage.Storage       // 持久化存储
 }
 
-// NewAPIHandler 创建API处理器实例
-func NewAPIHandler(clientMgr *manager.ClientManager, tunnelMgr *manager.TunnelManager) *APIHandler {
+// NewAPIHandler 创建 API 处理器
+func NewAPIHandler(clientMgr *manager.ClientManager, domain string, tunnelPort int, store *storage.Storage) *APIHandler {
 	return &APIHandler{
-		clientMgr:      clientMgr,
-		tunnelMgr:      tunnelMgr,
-		proxyPortMap:   make(map[int]int),
-		proxyListeners: make(map[int]net.Listener),
+		clientMgr:  clientMgr,
+		domain:     domain,
+		tunnelPort: tunnelPort,
+		store:      store,
 	}
 }
 
-// ListClients 获取所有在线客户端列表
+// ListClients 返回所有已连接的客户端列表
 func (h *APIHandler) ListClients(c *gin.Context) {
 	clients := h.clientMgr.ListClients()
 	c.JSON(http.StatusOK, model.Success(gin.H{
@@ -42,30 +43,55 @@ func (h *APIHandler) ListClients(c *gin.Context) {
 	}))
 }
 
-// POST /api/v1/clients/:id/proxy
-// proxyRequest 创建代理请求参数
+// proxyRequest 创建代理的请求参数
 type proxyRequest struct {
-	RemotePort int `json:"remote_port" binding:"required,min=1,max=65535"`
-	LocalPort  int `json:"local_port" binding:"required,min=1,max=65535"`
+	RemotePort int    `json:"remote_port" binding:"required,min=1,max=65535"`                 // 服务端暴露端口
+	LocalPort  int    `json:"local_port" binding:"required,min=1,max=65535"`                  // 客户端本地端口
+	Protocol   string `json:"protocol" binding:"required,oneof=tcp udp http https websocket"` // 协议类型
+	BindAddr   string `json:"bind_addr"`                                                      // 服务端绑定地址
+	LocalIP    string `json:"local_ip"`                                                       // 客户端本地 IP
 }
 
-// CreateProxy 为指定客户端创建端口代理
+// CreateProxy 创建代理映射
+//
+// 流程：
+// 1. 验证请求参数
+// 2. 生成隧道认证 token
+// 3. 向客户端发送代理命令
+// 4. 启动服务端代理监听
+// 5. 返回公网访问地址
 func (h *APIHandler) CreateProxy(c *gin.Context) {
-	// 从 URL 路径参数获取 id
 	clientID := c.Param("id")
 	var req proxyRequest
-	// 解析请求体 JSON 并绑定到 req
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, model.Error(400, "invalid request: "+err.Error()))
 		return
 	}
 
-	requestID := uuid.New().String()
-	cmdData, _ := json.Marshal(model.CommandData{
-		RequestID:  requestID,
+	table, ok := h.clientMgr.Get(clientID)
+	if !ok {
+		c.JSON(http.StatusNotFound, model.Error(404, "client not found"))
+		return
+	}
+
+	tunnelHost := table.TunnelHost(h.clientMgr.GetPublicIP())
+
+	token := generateToken()
+
+	cmdData, err := json.Marshal(model.CommandData{
 		RemotePort: req.RemotePort,
 		LocalPort:  req.LocalPort,
+		Protocol:   req.Protocol,
+		BindAddr:   req.BindAddr,
+		ServerHost: tunnelHost,
+		TunnelPort: h.tunnelPort,
+		Token:      token,
+		LocalIP:    req.LocalIP,
 	})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, model.Error(500, "failed to marshal command"))
+		return
+	}
 	cmd := model.WSMessage{
 		Type: "proxy",
 		Data: string(cmdData),
@@ -76,60 +102,74 @@ func (h *APIHandler) CreateProxy(c *gin.Context) {
 		return
 	}
 
-	// 记录端口映射
-	h.proxyPortLock.Lock()
-	h.proxyPortMap[req.RemotePort] = req.LocalPort
-	h.proxyPortLock.Unlock()
+	table.AddProxy(&manager.ProxyInfo{
+		RemotePort: req.RemotePort,
+		LocalPort:  req.LocalPort,
+		LocalIP:    req.LocalIP,
+		Protocol:   req.Protocol,
+		BindAddr:   req.BindAddr,
+	})
+	h.clientMgr.RegisterPort(clientID, req.RemotePort)
 
-	go h.StartProxyListener(req.RemotePort, clientID)
+	// 持久化保存
+	h.store.Add(storage.ProxyRecord{
+		ClientID:   clientID,
+		RemotePort: req.RemotePort,
+		LocalPort:  req.LocalPort,
+		LocalIP:    req.LocalIP,
+		Protocol:   req.Protocol,
+		BindAddr:   req.BindAddr,
+	})
 
+	if req.Protocol == "websocket" {
+		table.StoreWSToken(token, fmt.Sprintf("%s-%d", clientID, req.RemotePort))
+		go h.StartWSProxy(req.RemotePort, req.BindAddr, table, token)
+	} else {
+		// 存储隧道 token（用于隧道端口认证）
+		table.StoreTunnelToken(token, fmt.Sprintf("%s-%d", clientID, req.RemotePort))
+		go h.StartTCPProxy(req.RemotePort, req.BindAddr, table, token)
+	}
+
+	publicAddr := h.domain
+	if publicAddr == "" {
+		publicAddr = h.clientMgr.GetPublicIP()
+	}
 	c.JSON(http.StatusOK, model.Success(gin.H{
-		"public_addr": "your-server.com:" + strconv.Itoa(req.RemotePort),
+		"public_addr": publicAddr + ":" + strconv.Itoa(req.RemotePort),
 	}))
 }
 
-// GET /api/v1/clients/:id/ports
-// ListClientPorts 获取指定客户端的端口列表
-func (h *APIHandler) ListClientPorts(c *gin.Context) {
+func generateToken() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
+	return hex.EncodeToString(b)
+}
+
+func (h *APIHandler) GetClientInfo(c *gin.Context) {
 	clientID := c.Param("id")
 
-	// 检查客户端是否在线
-	conn, ok := h.clientMgr.Get(clientID)
+	table, ok := h.clientMgr.Get(clientID)
 	if !ok {
 		c.JSON(http.StatusNotFound, model.Error(404, "client not found"))
 		return
 	}
 
-	// 生成请求 ID
-	requestID := uuid.New().String()
-
-	// 创建响应通道（用于等待 Client 回复）
-	respChan := make(chan *model.PortsListData, 1)
-	h.clientMgr.RegisterPendingRequest(requestID, respChan)
-	defer h.clientMgr.UnregisterPendingRequest(requestID)
-
-	// 构造并发送命令
-	cmd := model.WSMessage{
-		Type: "list_ports",
-		Data: model.ListPortsCmd{RequestID: requestID},
-	}
-	if err := conn.WriteJSON(cmd); err != nil {
-		c.JSON(http.StatusInternalServerError, model.Error(500, "failed to send command: "+err.Error()))
-		return
+	proxies := table.ListProxies()
+	ports := make([]gin.H, 0, len(proxies))
+	for _, p := range proxies {
+		ports = append(ports, gin.H{
+			"remote_port": p.RemotePort,
+			"local_port":  p.LocalPort,
+			"local_ip":    p.LocalIP,
+			"protocol":    p.Protocol,
+			"bind_addr":   p.BindAddr,
+		})
 	}
 
-	// 等待响应（带超时）
-	select {
-	case resp := <-respChan:
-		if resp.Error != "" {
-			c.JSON(http.StatusInternalServerError, model.Error(500, resp.Error))
-			return
-		}
-		c.JSON(http.StatusOK, model.Success(gin.H{
-			"client_id": clientID,
-			"ports":     resp.Ports,
-		}))
-	case <-time.After(10 * time.Second):
-		c.JSON(http.StatusGatewayTimeout, model.Error(504, "client response timeout"))
-	}
+	c.JSON(http.StatusOK, model.Success(gin.H{
+		"client_id": clientID,
+		"ports":     ports,
+	}))
 }

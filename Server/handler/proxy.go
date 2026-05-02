@@ -1,83 +1,13 @@
 package handler
 
 import (
-	"Aether/Server/manager"
 	"Aether/Server/model"
-	"fmt"
-	"log"
-	"net"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
-func (h *APIHandler) StartProxyListener(port int, clientID string) {
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		log.Printf("failed to listen on port %d: %v", port, err)
-		return
-	}
-	defer ln.Close()
-
-	h.listenerLock.Lock()
-	h.proxyListeners[port] = ln
-	h.listenerLock.Unlock()
-
-	log.Printf("proxy listening on :%d for client %s", port, clientID)
-
-	for {
-		conn, err := ln.Accept()
-		if err != nil {
-			log.Printf("accept error on port %d: %v", port, err)
-			continue
-		}
-		go h.handleProxyConn(conn, clientID, port)
-	}
-}
-
-func (h *APIHandler) handleProxyConn(conn net.Conn, clientID string, remotePort int) {
-	h.proxyPortLock.RLock()
-	localPort, ok := h.proxyPortMap[remotePort]
-	h.proxyPortLock.RUnlock()
-	if !ok {
-		log.Printf("no local port mapping for remote port %d", remotePort)
-		conn.Close()
-		return
-	}
-
-	tunnelID := uuid.New().String()
-	tunnel := &manager.Tunnel{
-		ID:         tunnelID,
-		ClientID:   clientID,
-		RemotePort: remotePort,
-		LocalPort:  localPort,
-		Conn:       conn,
-		CreatedAt:  time.Now().Unix(),
-	}
-	h.tunnelMgr.Add(tunnelID, tunnel)
-
-	cmd := model.WSMessage{
-		Type: "new_tunnel",
-		Data: map[string]interface{}{
-			"tunnel_id":  tunnelID,
-			"local_port": localPort,
-		},
-	}
-	if err := h.clientMgr.SendCommand(clientID, cmd); err != nil {
-		log.Printf("failed to send new_tunnel to client %s: %v", clientID, err)
-		conn.Close()
-		h.tunnelMgr.Remove(tunnelID)
-		return
-	}
-
-	// 启动从公网连接读取并转发到客户端的 goroutine
-	go h.tunnelMgr.ForwardToClient(tunnelID, h.clientMgr) // 需调整参数
-}
-
-// DELETE /api/v1/proxies/:port
 func (h *APIHandler) CloseProxy(c *gin.Context) {
 	portStr := c.Param("port")
 	port, err := strconv.Atoi(portStr)
@@ -86,24 +16,49 @@ func (h *APIHandler) CloseProxy(c *gin.Context) {
 		return
 	}
 
-	h.listenerLock.Lock()
-	ln, ok := h.proxyListeners[port]
-	if ok {
-		ln.Close()
-		delete(h.proxyListeners, port)
-	}
-	h.listenerLock.Unlock()
-
-	h.proxyPortLock.Lock()
-	delete(h.proxyPortMap, port)
-	h.proxyPortLock.Unlock()
-
+	clientID, ok := h.clientMgr.GetClientIDByPort(port)
 	if !ok {
 		c.JSON(http.StatusNotFound, model.Error(404, "proxy not found"))
 		return
 	}
 
+	table, ok := h.clientMgr.Get(clientID)
+	if !ok {
+		c.JSON(http.StatusNotFound, model.Error(404, "client not found"))
+		return
+	}
+
+	ln := table.GetProxyListener(port)
+	if ln == nil {
+		c.JSON(http.StatusNotFound, model.Error(404, "proxy not found"))
+		return
+	}
+
+	key := table.TunnelKey(port)
+	notifyMsg := model.WSMessage{
+		Type: "proxy_closed",
+		Data: map[string]string{"key": key},
+	}
+	table.Conn().WriteJSON(&notifyMsg)
+
+	if err := ln.Close(); err != nil {
+	}
+
+	table.RemoveProxy(port)
+	table.RemoveTunnelTokenByKey(key)
+	h.clientMgr.UnregisterPort(port)
+
+	// 从持久化存储中删除
+	h.store.Remove(clientID, port)
+
 	c.JSON(http.StatusOK, model.Success(gin.H{
 		"message": "proxy closed",
+	}))
+}
+
+func (h *APIHandler) ListProxies(c *gin.Context) {
+	proxies := h.clientMgr.ListAllProxies()
+	c.JSON(http.StatusOK, model.Success(gin.H{
+		"proxies": proxies,
 	}))
 }
