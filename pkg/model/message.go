@@ -70,3 +70,42 @@ type TunnelReadyMsg struct {
 type TunnelReadyData struct {
 	Status string `json:"status"`
 }
+
+type P2PSignalData struct {
+	SessionID     string `json:"session_id"`
+	Protocol      string `json:"protocol"`
+	Role          string `json:"role"`
+	PeerClientID  string `json:"peer_client_id"`
+	SourcePort    int    `json:"source_port"`
+	TargetPort    int    `json:"target_port"`
+	TargetLocalIP string `json:"target_local_ip"`
+	SourceLocalIP string `json:"source_local_ip"`
+	ServerHost    string `json:"server_host"`
+	Token         string `json:"token"`
+}
+
+type P2PRelayAuth struct {
+	Type string           `json:"type"`
+	Data P2PRelayAuthData `json:"data"`
+}
+
+type P2PRelayAuthData struct {
+	SessionID string `json:"session_id"`
+	Token     string `json:"token"`
+	Role      string `json:"role"`
+}
+
+type P2PRelayReady struct {
+	Type string            `json:"type"`
+	Data P2PRelayReadyData `json:"data"`
+}
+
+type P2PRelayReadyData struct {
+	Status string `json:"status"`
+}
+
+type P2PStatusData struct {
+	SessionID string `json:"session_id"`
+	Status    string `json:"status"`
+	Message   string `json:"message,omitempty"`
+}

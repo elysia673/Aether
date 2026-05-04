@@ -43,27 +43,37 @@ type Handler struct {
 	baseCancel context.CancelFunc
 	tunnelMu   sync.Mutex
 	tunnelCtxs map[string]context.CancelFunc
+	p2p        *p2pManager
 }
 
 // New creates a new Handler.
 func New(cfg Config) *Handler {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Handler{
+	h := &Handler{
 		cfg:        cfg,
 		baseCtx:    ctx,
 		baseCancel: cancel,
 		tunnelCtxs: make(map[string]context.CancelFunc),
 	}
+	p2pm := newP2PManager(cfg, ctx)
+	h.p2p = p2pm
+	return h
 }
 
 // SetSender sets the message sender (typically a conn.Connection).
 func (h *Handler) SetSender(sender MessageSender) {
 	h.sender = sender
+	if h.p2p != nil {
+		h.p2p.SetSender(sender)
+	}
 }
 
 // Stop cancels all running tunnels.
 func (h *Handler) Stop() {
 	h.baseCancel()
+	if h.p2p != nil {
+		h.p2p.Close()
+	}
 }
 
 // Handle dispatches incoming server messages by type.
@@ -78,6 +88,14 @@ func (h *Handler) Handle(msg *model.WSMessage) {
 		h.handleProxy(msg.Data)
 	case "proxy_closed":
 		h.handleProxyClosed(msg.Data)
+	case "p2p_signal":
+		if h.p2p != nil {
+			h.p2p.handleP2PSignal(msg.Data)
+		}
+	case "p2p_closed":
+		if h.p2p != nil {
+			h.p2p.handleP2PClosed(msg.Data)
+		}
 	}
 }
 
