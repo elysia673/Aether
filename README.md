@@ -249,13 +249,12 @@ curl -X POST https://your-domain.com:9909/api/v1/clients/my-device/proxy \
 ### 客户端
 
 ```bash
-./aether-client -id my-device -http
+./aether-client -config client.json
 ```
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `-id` | `raspberry-pi-01` | 客户端标识 |
-| `-http` | `false` | 使用 HTTP/WS 模式 |
+| `-config` | `client.json` | 配置文件路径 |
 
 ### CLI 工具
 

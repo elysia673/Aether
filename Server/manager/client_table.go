@@ -132,8 +132,12 @@ func (t *ClientTable) IsPending(key string) bool {
 
 func (t *ClientTable) PutMultiplexer(key string, mx *mux.Multiplexer) {
 	t.tunnelMu.Lock()
+	old := t.multiplexers[key]
 	t.multiplexers[key] = mx
 	t.tunnelMu.Unlock()
+	if old != nil {
+		old.Close()
+	}
 }
 
 func (t *ClientTable) GetMultiplexer(key string) (*mux.Multiplexer, error) {
@@ -156,9 +160,11 @@ func (t *ClientTable) RemoveTunnel(key string) {
 	t.tunnelMu.Unlock()
 }
 
-func (t *ClientTable) RemoveMux(key string) {
+func (t *ClientTable) RemoveMux(key string, mx *mux.Multiplexer) {
 	t.tunnelMu.Lock()
-	delete(t.multiplexers, key)
+	if t.multiplexers[key] == mx {
+		delete(t.multiplexers, key)
+	}
 	t.tunnelMu.Unlock()
 }
 

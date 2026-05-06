@@ -2,6 +2,7 @@ package handler
 
 import (
 	"Aether/Server/manager"
+	"Aether/pkg/model"
 	"Aether/tools/mux"
 	"Aether/tools/wsconn"
 	"encoding/json"
@@ -12,24 +13,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 )
-
-type tunnelAuthMsg struct {
-	Type string         `json:"type"`
-	Data tunnelAuthData `json:"data"`
-}
-
-type tunnelAuthData struct {
-	Token string `json:"token"`
-}
-
-type tunnelReadyMsg struct {
-	Type string          `json:"type"`
-	Data tunnelReadyData `json:"data"`
-}
-
-type tunnelReadyData struct {
-	Status string `json:"status"`
-}
 
 func (h *WSHandler) HandleTunnelWS(c *gin.Context) {
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
@@ -45,7 +28,7 @@ func (h *WSHandler) HandleTunnelWS(c *gin.Context) {
 		return
 	}
 
-	var auth tunnelAuthMsg
+	var auth model.TunnelAuthMsg
 	if err := json.Unmarshal(msg, &auth); err != nil {
 		log.Printf("tunnel auth json error: %v", err)
 		conn.WriteJSON(map[string]string{"type": "tunnel_error", "data": "invalid auth"})
@@ -72,9 +55,9 @@ func (h *WSHandler) HandleTunnelWS(c *gin.Context) {
 
 	mx := mux.New(wsAdapter)
 
-	ready := tunnelReadyMsg{
+	ready := model.TunnelReadyMsg{
 		Type: "tunnel_ready",
-		Data: tunnelReadyData{Status: "ok"},
+		Data: model.TunnelReadyData{Status: "ok"},
 	}
 	if err := conn.WriteJSON(ready); err != nil {
 		log.Printf("tunnel ready write error: %v", err)
@@ -86,7 +69,7 @@ func (h *WSHandler) HandleTunnelWS(c *gin.Context) {
 	log.Printf("Tunnel multiplexer created for key %s via WebSocket", key)
 
 	<-mx.Done()
-	table.RemoveMux(key)
+	table.RemoveMux(key, mx)
 	table.RemoveWSToken(auth.Data.Token)
 	log.Printf("Tunnel multiplexer closed for key %s", key)
 }

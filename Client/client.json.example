@@ -1,0 +1,9 @@
+{
+  "server_url": "wss://your-server.com:9909/ws",
+  "client_token": "your-client-token",
+  "client_id": "raspberry-pi-01",
+  "use_http": false,
+  "tls_sni": "",
+  "origin": "",
+  "reconnect_delay_seconds": 5
+}

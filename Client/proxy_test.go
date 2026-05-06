@@ -1,6 +1,7 @@
 package main
 
 import (
+	"Aether/pkg/model"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,24 +13,25 @@ import (
 func TestParseDataFromServer(t *testing.T) {
 	wsMessage := `{"type":"proxy","data":"{\"server_host\":\"example.com\",\"remote_port\":17335,\"local_port\":25565}"}`
 
-	var msg map[string]interface{}
-	json.Unmarshal([]byte(wsMessage), &msg)
-
-	var data map[string]interface{}
-	if str, ok := msg["data"].(string); ok {
-		json.Unmarshal([]byte(str), &data)
+	var msg model.WSMessage
+	if err := json.Unmarshal([]byte(wsMessage), &msg); err != nil {
+		t.Fatal(err)
 	}
 
-	serverHost := data["server_host"].(string)
-	remotePort := int(data["remote_port"].(float64))
+	var cmd model.CommandData
+	if dataStr, ok := msg.Data.(string); ok {
+		if err := json.Unmarshal([]byte(dataStr), &cmd); err != nil {
+			t.Fatal(err)
+		}
+	}
 
-	t.Logf("After parsing: server_host=%s, remote_port=%d", serverHost, remotePort)
+	t.Logf("After parsing: server_host=%s, remote_port=%d", cmd.ServerHost, cmd.RemotePort)
 
-	if serverHost == "" {
+	if cmd.ServerHost == "" {
 		t.Error("server_host is empty!")
 	}
-	if remotePort != 17335 {
-		t.Errorf("Expected remote_port=17335, got %d", remotePort)
+	if cmd.RemotePort != 17335 {
+		t.Errorf("Expected remote_port=17335, got %d", cmd.RemotePort)
 	}
 }
 
@@ -61,30 +63,33 @@ func TestFullProxyFlow(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	proxyCmd := map[string]interface{}{
-		"type": "proxy",
-		"data": map[string]interface{}{
-			"server_host": "127.0.0.1",
-			"remote_port": float64(remotePort),
-			"local_port":  float64(localPort),
-		},
+	cmd := model.CommandData{
+		ServerHost: "127.0.0.1",
+		RemotePort: remotePort,
+		LocalPort:  localPort,
 	}
-
+	cmdBytes, _ := json.Marshal(cmd)
+	proxyCmd := model.WSMessage{
+		Type: "proxy",
+		Data: string(cmdBytes),
+	}
 	dataBytes, _ := json.Marshal(proxyCmd)
-	var parsed map[string]interface{}
+
+	var parsed model.WSMessage
 	json.Unmarshal(dataBytes, &parsed)
 
-	data := parsed["data"].(map[string]interface{})
-	remotePort2 := int(data["remote_port"].(float64))
-	localPort2 := int(data["local_port"].(float64))
+	var cmd2 model.CommandData
+	if dataStr, ok := parsed.Data.(string); ok {
+		json.Unmarshal([]byte(dataStr), &cmd2)
+	}
 
-	clientTunnelConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", remotePort2))
+	clientTunnelConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", cmd2.RemotePort))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer clientTunnelConn.Close()
 
-	clientLocalConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", localPort2))
+	clientLocalConn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", cmd2.LocalPort))
 	if err != nil {
 		t.Fatal(err)
 	}

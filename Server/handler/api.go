@@ -5,8 +5,8 @@ package handler
 
 import (
 	"Aether/Server/manager"
-	"Aether/Server/model"
 	"Aether/Server/storage"
+	"Aether/pkg/model"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"

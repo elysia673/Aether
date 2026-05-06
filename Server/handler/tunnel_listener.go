@@ -99,7 +99,7 @@ func (tl *TunnelListener) handleTunnelConn(conn net.Conn) {
 	log.Printf("Tunnel multiplexer created for %s from %s", proxyKey, remoteAddr)
 
 	<-mx.Done()
-	table.RemoveMux(proxyKey)
+	table.RemoveMux(proxyKey, mx)
 	log.Printf("Tunnel multiplexer closed for %s", proxyKey)
 }
 
