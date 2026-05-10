@@ -33,13 +33,13 @@ build-darwin: | generate-env
 	@mkdir -p $(BUILD_DIR)/$(DARWIN_GOOS)-$(DARWIN_GOARCH)
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(DARWIN_GOOS) GOARCH=$(DARWIN_GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o $(BUILD_DIR)/$(DARWIN_GOOS)-$(DARWIN_GOARCH)/$(BINARY_NAME_SERVER) \
-		./Server
+		./Aether_Server
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(DARWIN_GOOS) GOARCH=$(DARWIN_GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o $(BUILD_DIR)/$(DARWIN_GOOS)-$(DARWIN_GOARCH)/$(BINARY_NAME_CLIENT) \
-		./Client
+		./Aether_Client
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(DARWIN_GOOS) GOARCH=$(DARWIN_GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o $(BUILD_DIR)/$(DARWIN_GOOS)-$(DARWIN_GOARCH)/$(BINARY_NAME_CLI) \
-		./cmd/aether-cli
+		./Aether_Cmd/aether-cli
 
 # 构建 Linux amd64 平台
 build-linux: | generate-env
@@ -47,13 +47,13 @@ build-linux: | generate-env
 	@mkdir -p $(BUILD_DIR)/$(LINUX_GOOS)-$(LINUX_GOARCH)
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(LINUX_GOOS) GOARCH=$(LINUX_GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o $(BUILD_DIR)/$(LINUX_GOOS)-$(LINUX_GOARCH)/$(BINARY_NAME_SERVER) \
-		./Server
+		./Aether_Server
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(LINUX_GOOS) GOARCH=$(LINUX_GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o $(BUILD_DIR)/$(LINUX_GOOS)-$(LINUX_GOARCH)/$(BINARY_NAME_CLIENT) \
-		./Client
+		./Aether_Client
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(LINUX_GOOS) GOARCH=$(LINUX_GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o $(BUILD_DIR)/$(LINUX_GOOS)-$(LINUX_GOARCH)/$(BINARY_NAME_CLI) \
-		./cmd/aether-cli
+		./Aether_Cmd/aether-cli
 
 # 构建 Linux arm64 平台
 build-linux-arm64: | generate-env
@@ -61,13 +61,13 @@ build-linux-arm64: | generate-env
 	@mkdir -p $(BUILD_DIR)/$(LINUX_ARM64_GOOS)-$(LINUX_ARM64_GOARCH)
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(LINUX_ARM64_GOOS) GOARCH=$(LINUX_ARM64_GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o $(BUILD_DIR)/$(LINUX_ARM64_GOOS)-$(LINUX_ARM64_GOARCH)/$(BINARY_NAME_SERVER) \
-		./Server
+		./Aether_Server
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(LINUX_ARM64_GOOS) GOARCH=$(LINUX_ARM64_GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o $(BUILD_DIR)/$(LINUX_ARM64_GOOS)-$(LINUX_ARM64_GOARCH)/$(BINARY_NAME_CLIENT) \
-		./Client
+		./Aether_Client
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(LINUX_ARM64_GOOS) GOARCH=$(LINUX_ARM64_GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o $(BUILD_DIR)/$(LINUX_ARM64_GOOS)-$(LINUX_ARM64_GOARCH)/$(BINARY_NAME_CLI) \
-		./cmd/aether-cli
+		./Aether_Cmd/aether-cli
 
 # 构建 Windows 平台
 build-windows: | generate-env
@@ -75,13 +75,13 @@ build-windows: | generate-env
 	@mkdir -p $(BUILD_DIR)/$(WINDOWS_GOOS)-$(WINDOWS_GOARCH)
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(WINDOWS_GOOS) GOARCH=$(WINDOWS_GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o $(BUILD_DIR)/$(WINDOWS_GOOS)-$(WINDOWS_GOARCH)/$(BINARY_NAME_SERVER).exe \
-		./Server
+		./Aether_Server
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(WINDOWS_GOOS) GOARCH=$(WINDOWS_GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o $(BUILD_DIR)/$(WINDOWS_GOOS)-$(WINDOWS_GOARCH)/$(BINARY_NAME_CLIENT).exe \
-		./Client
+		./Aether_Client
 	CGO_ENABLED=$(CGO_ENABLED) GOOS=$(WINDOWS_GOOS) GOARCH=$(WINDOWS_GOARCH) $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o $(BUILD_DIR)/$(WINDOWS_GOOS)-$(WINDOWS_GOARCH)/$(BINARY_NAME_CLI).exe \
-		./cmd/aether-cli
+		./Aether_Cmd/aether-cli
 
 clean:
 	@echo "Cleaning build artifacts..."
@@ -103,11 +103,11 @@ generate-env:
 # 以下为调试运行目标，依赖 .env 文件
 dev-server: $(ENV_FILE)
 	@echo "Starting server using $(ENV_FILE)..."
-	env $$(cat $(ENV_FILE) | xargs) go run ./Server
+	env $$(cat $(ENV_FILE) | xargs) go run ./Aether_Server
 
 dev-client: $(ENV_FILE)
 	@echo "Starting client using $(ENV_FILE)..."
-	env $$(cat $(ENV_FILE) | xargs) go run ./Client
+	env $$(cat $(ENV_FILE) | xargs) go run ./Aether_Client
 
 run-server: build-darwin $(ENV_FILE)
 	@echo "Starting built server using $(ENV_FILE)..."
