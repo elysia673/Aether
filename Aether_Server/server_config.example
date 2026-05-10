@@ -1,0 +1,39 @@
+# https
+{
+  "server": {
+    "addr": ":9909",
+    "domain": "your-domain.com",
+    "tunnel_port": 9908
+  },
+  "tls": {
+    "enabled": true,
+    "cert_file": "ssl/cert.pem",
+    "key_file": "ssl/key.pem"
+  },
+  "auth": {
+    "api_key": "",
+    "client_token": ""
+  },
+  "storage": "data/proxies.json",
+  "public_ip": ""
+}
+
+# http
+{
+  "server": {
+    "addr": ":9909",
+    "domain": "your-domain.com",
+    "tunnel_port": 9908
+  },
+  "tls": {
+    "enabled": false,
+    "cert_file": "",
+    "key_file": ""
+  },
+  "auth": {
+    "api_key": "your-api-key",
+    "client_token": "your-client-token"
+  },
+  "storage": "data/proxies.json",
+  "public_ip": ""
+}

@@ -23,6 +23,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+	GitCommit = "unknown"
+)
+
 // getPublicIP 自动获取服务器公网 IP
 // 优先使用环境变量 AETHER_PUBLIC_IP，否则通过外部服务获取
 func getPublicIP() string {
