@@ -38,12 +38,13 @@ type LoginResponse struct {
 }
 
 // NewAPIHandler 创建 API 处理器
-func NewAPIHandler(clientMgr *manager.ClientManager, domain string, tunnelPort int, store *storage.Storage) *APIHandler {
+func NewAPIHandler(clientMgr *manager.ClientManager, domain string, tunnelPort int, store *storage.Storage, cfg *config.ServerConfig) *APIHandler {
 	return &APIHandler{
 		clientMgr:  clientMgr,
 		domain:     domain,
 		tunnelPort: tunnelPort,
 		store:      store,
+		cfg:        cfg,
 	}
 }
 
@@ -208,8 +209,8 @@ func (h *APIHandler) HandleLogin(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, LoginResponse{
+	c.JSON(http.StatusOK, model.Success(LoginResponse{
 		Token:     token,
 		ExpiresIn: 86400,
-	})
+	}))
 }

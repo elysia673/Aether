@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -35,9 +36,19 @@ func isKeyRegistered(apiKey string) bool {
 }
 
 func markKeyRegistered(apiKey string) error {
-	os.MkdirAll(registerDir, 0755)
+	err := os.MkdirAll(registerDir, 0755)
+	if err != nil {
+		log.Printf("创建目录失败: %v (路径: %s)", err, registerDir)
+		return err
+	}
 	path := getKeyFilePath(apiKey)
-	return os.WriteFile(path, []byte("registered"), 0644)
+	log.Printf("创建占位文件: %s", path)
+	err = os.WriteFile(path, []byte("registered"), 0644)
+	if err != nil {
+		log.Printf("写入文件失败: %v (路径: %s)", err, path)
+		return err
+	}
+	return nil
 }
 
 func CleanupExpiredRegistrations() {
@@ -64,8 +75,12 @@ func CleanupExpiredRegistrations() {
 
 // GenerateToken 生成 JWT Token
 func GenerateToken(apiKey string) (string, error) {
-	if isKeyRegistered(apiKey) {
-		return "", fmt.Errorf("API Key 已注册")
+	absPath, _ := filepath.Abs(getKeyFilePath(apiKey))
+	registered := isKeyRegistered(apiKey)
+	log.Printf("检查 API Key 是否已注册: %v (路径: %s, 绝对路径: %s)", registered, getKeyFilePath(apiKey), absPath)
+	
+	if registered {
+		return "", fmt.Errorf("API Key 已注册，请使用已有的 token")
 	}
 
 	claims := Claims{

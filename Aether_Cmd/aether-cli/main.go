@@ -771,9 +771,17 @@ func cmdLogin(args ...string) {
 	}
 	defer resp.Body.Close()
 
+	// 检查 HTTP 状态码
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "登录失败 (HTTP %d): %s\n", resp.StatusCode, string(respBody))
+		os.Exit(1)
+	}
+
 	respBody, _ := io.ReadAll(resp.Body)
 	var result struct {
-		Code int `json:"code"`
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
 		Data struct {
 			Token     string `json:"token"`
 			ExpiresIn int64  `json:"expires_in"`
@@ -782,7 +790,7 @@ func cmdLogin(args ...string) {
 	json.Unmarshal(respBody, &result)
 
 	if result.Code != 0 {
-		fmt.Fprintf(os.Stderr, "登录失败\n")
+		fmt.Fprintf(os.Stderr, "登录失败: %s\n", result.Msg)
 		os.Exit(1)
 	}
 

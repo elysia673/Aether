@@ -222,7 +222,7 @@ func main() {
 	registerHandler := handler.NewRegisterHandler(cfg, registry)
 
 	// 初始化 API 处理器
-	apiHandler := handler.NewAPIHandler(clientMgr, cfg.Server.Domain, cfg.Server.TunnelPort, store)
+	apiHandler := handler.NewAPIHandler(clientMgr, cfg.Server.Domain, cfg.Server.TunnelPort, store, cfg)
 
 	// 初始化中继处理器
 	relayHandler := handler.NewRelayHandler(clientMgr, cfg.Server.Domain)
@@ -258,9 +258,9 @@ func main() {
 		public.GET("/register_info", registerHandler.HandleRegisterInfo)
 	}
 
-	// 需要认证的端点
+	// 需要认证的端点（使用 JWT Token 认证）
 	api := r.Group("/api/v1")
-	api.Use(middleware.Auth(cfg.Auth.APIKey))
+	api.Use(middleware.JWTAuth())
 	api.Use(middleware.RateLimit(60))
 	{
 		api.POST("/register_add", registerHandler.HandleRegisterAdd)
