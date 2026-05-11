@@ -4,11 +4,13 @@ import (
 	"Aether/Aether_Server/handler"
 	"Aether/Aether_Server/manager"
 	"Aether/Aether_Server/middleware"
+	"Aether/Aether_Server/register"
 	"Aether/Aether_Server/storage"
 	"Aether/common/config"
 	"Aether/common/model"
 	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -168,6 +170,8 @@ func restoreClientProxies(cfg *config.ServerConfig, clientMgr *manager.ClientMan
 }
 
 func main() {
+	middleware.CleanupExpiredRegistrations()
+
 	// 定义命令行参数
 	configPath := flag.String("config", "config.json", "path to config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -205,6 +209,18 @@ func main() {
 		PublicIP:    publicIP,
 	})
 
+	// 初始化 CA
+	err = register.InitCA("./data/ca.crt", "./data/ca.key")
+	if err != nil {
+		log.Fatalf("init CA: %v", err)
+	}
+	log.Println("CA 初始化成功")
+
+	// 初始化注册表
+	registry := register.NewRegistry("./data/registry.json")
+
+	registerHandler := handler.NewRegisterHandler(cfg, registry)
+
 	// 初始化 API 处理器
 	apiHandler := handler.NewAPIHandler(clientMgr, cfg.Server.Domain, cfg.Server.TunnelPort, store)
 
@@ -232,25 +248,38 @@ func main() {
 		}))
 	})
 
-	// API 路由组（需要 API Key 认证 + 速率限制）
+	r.POST("/api/v1/login", apiHandler.HandleLogin)
+
+	// 公开端点（不需要认证）
+	public := r.Group("/api/v1")
+	public.Use(middleware.RateLimit(60))
+	{
+		public.POST("/register_apply", registerHandler.HandleRegisterApply)
+		public.GET("/register_info", registerHandler.HandleRegisterInfo)
+	}
+
+	// 需要认证的端点
 	api := r.Group("/api/v1")
 	api.Use(middleware.Auth(cfg.Auth.APIKey))
 	api.Use(middleware.RateLimit(60))
 	{
-		api.GET("/clients", apiHandler.ListClients)              // 列出所有已连接客户端
-		api.GET("/clients/:id/info", apiHandler.GetClientInfo)   // 获取客户端代理信息
-		api.POST("/clients/:id/proxy", apiHandler.CreateProxy)   // 创建代理映射
-		api.GET("/proxies", apiHandler.ListProxies)              // 列出所有代理
-		api.DELETE("/proxies/:port", apiHandler.CloseProxy)      // 关闭代理
-		api.POST("/relay/connect", relayHandler.CreateRelay)           // 创建中继连接
+		api.POST("/register_add", registerHandler.HandleRegisterAdd)
+		api.POST("/register_delete", registerHandler.HandleRegisterDelete)
+		api.GET("/register_apply_list", registerHandler.HandleRegisterApplyList)
+		api.GET("/clients", apiHandler.ListClients)                  // 列出所有已连接客户端
+		api.GET("/clients/:id/info", apiHandler.GetClientInfo)       // 获取客户端代理信息
+		api.POST("/clients/:id/proxy", apiHandler.CreateProxy)       // 创建代理映射
+		api.GET("/proxies", apiHandler.ListProxies)                  // 列出所有代理
+		api.DELETE("/proxies/:port", apiHandler.CloseProxy)          // 关闭代理
+		api.POST("/relay/connect", relayHandler.CreateRelay)         // 创建中继连接
 		api.GET("/relay/sessions", relayHandler.ListSessions)        // 列出中继会话
 		api.DELETE("/relay/sessions/:id", relayHandler.CloseSession) // 关闭中继会话
 	}
 
 	// WebSocket 端点
-	wsHandler := handler.NewWSHandler(clientMgr)
-	r.GET("/ws", wsHandler.Handle)                // 客户端注册连接
-	r.GET("/tunnel", wsHandler.HandleTunnelWS)    // WebSocket 隧道
+	wsHandler := handler.NewWSHandler(clientMgr, registry)
+	r.GET("/ws", wsHandler.Handle)              // 客户端注册连接
+	r.GET("/tunnel", wsHandler.HandleTunnelWS)  // WebSocket 隧道
 	r.GET("/relay", relayHandler.HandleRelayWS) // 中继 WebSocket
 
 	// 启动隧道监听器
@@ -274,16 +303,26 @@ func main() {
 	}
 
 	// 启动 HTTP/HTTPS 服务
+	caCert, _ := register.GetCA()
+	if caCert == nil {
+		log.Fatal("CA certificate not loaded")
+	}
+
+	caCertPool := x509.NewCertPool()
+	caCertPool.AddCert(caCert)
+
 	server := &http.Server{
 		Addr:    cfg.Server.Addr,
 		Handler: r,
 		TLSConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
+			ClientCAs:  caCertPool,
+			ClientAuth: tls.RequestClientCert, // 请求但不强制
 		},
 	}
 
 	if cfg.TLS.Enabled {
-		log.Printf("正在启动 HTTPS/WSS 服务器，地址 %s", server.Addr)
+		log.Printf("正在启动 HTTPS/WSS 服务器（mTLS），地址 %s", server.Addr)
 		log.Fatal(server.ListenAndServeTLS(cfg.TLS.CertFile, cfg.TLS.KeyFile))
 	} else {
 		log.Printf("正在启动 HTTP/WS 服务器，地址 %s", server.Addr)

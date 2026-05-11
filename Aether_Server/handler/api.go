@@ -5,7 +5,9 @@ package handler
 
 import (
 	"Aether/Aether_Server/manager"
+	"Aether/Aether_Server/middleware"
 	"Aether/Aether_Server/storage"
+	"Aether/common/config"
 	"Aether/common/model"
 	"crypto/rand"
 	"encoding/hex"
@@ -23,6 +25,16 @@ type APIHandler struct {
 	domain     string                 // 公网域名
 	tunnelPort int                    // 隧道端口
 	store      *storage.Storage       // 持久化存储
+	cfg        *config.ServerConfig
+}
+
+type LoginRequest struct {
+	APIKey string `json:"api_key" binding:"required"`
+}
+
+type LoginResponse struct {
+	Token     string `json:"token"`
+	ExpiresIn int64  `json:"expires_in"`
 }
 
 // NewAPIHandler 创建 API 处理器
@@ -176,4 +188,28 @@ func (h *APIHandler) GetClientInfo(c *gin.Context) {
 		"client_id": clientID,
 		"ports":     ports,
 	}))
+}
+
+func (h *APIHandler) HandleLogin(c *gin.Context) {
+	var req LoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, model.Error(400, "invalid request: "+err.Error()))
+		return
+	}
+
+	if req.APIKey != h.cfg.Auth.APIKey {
+		c.JSON(http.StatusUnauthorized, model.Error(401, "invalid API key"))
+		return
+	}
+
+	token, err := middleware.GenerateToken(req.APIKey)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, model.Error(500, "failed to generate token: "+err.Error()))
+		return
+	}
+
+	c.JSON(http.StatusOK, LoginResponse{
+		Token:     token,
+		ExpiresIn: 86400,
+	})
 }

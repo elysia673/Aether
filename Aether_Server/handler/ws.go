@@ -2,6 +2,7 @@ package handler
 
 import (
 	"Aether/Aether_Server/manager"
+	"Aether/Aether_Server/register"
 	"log"
 	"net"
 	"net/http"
@@ -22,18 +23,35 @@ var upgrader = websocket.Upgrader{
 // WSHandler 处理 WebSocket 连接
 type WSHandler struct {
 	clientMgr *manager.ClientManager
+	registry  *register.Registry
 }
 
 // NewWSHandler 创建 WebSocket 处理器
-func NewWSHandler(mgr *manager.ClientManager) *WSHandler {
-	return &WSHandler{clientMgr: mgr}
+func NewWSHandler(mgr *manager.ClientManager, registry *register.Registry) *WSHandler {
+	return &WSHandler{clientMgr: mgr, registry: registry}
 }
 
 // Handle 处理客户端 WebSocket 注册连接
-//
-// 客户端通过此端点建立 WebSocket 连接并注册身份。
-// 连接后会启动读写协程和心跳检测。
 func (h *WSHandler) Handle(c *gin.Context) {
+	// 验证客户端证书
+	certs := c.Request.TLS.PeerCertificates
+	if len(certs) == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "client certificate required"})
+		return
+	}
+
+	// 从证书中提取客户端 ID（CommonName）
+	clientCert := certs[0]
+	clientID := clientCert.Subject.CommonName
+
+	// 验证证书是否在注册表中且状态为 approved
+	record := h.registry.GetByClientID(clientID)
+	if record == nil || record.Status != "approved" {
+		log.Printf("客户端证书验证失败: %s (状态: %v)", clientID, record)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "client certificate revoked or not approved"})
+		return
+	}
+
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("websocket upgrade error: %v", err)

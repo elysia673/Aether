@@ -29,8 +29,10 @@ var (
 
 // CLIConfig CLI 配置
 type CLIConfig struct {
-	Server   string `json:"server"`   // 服务端地址，如 https://your-server.com:9909
-	APIKey   string `json:"api_key"`  // API 访问密钥
+	Server   string `json:"server"`  // 服务端地址，如 https://your-server.com:9909
+	APIKey   string `json:"api_key"` // API 访问密钥
+	Token    string `json:"token"`
+	TokenExp int64  `json:"token_exp"`
 	Insecure bool   `json:"insecure"` // 跳过 TLS 验证
 }
 
@@ -113,6 +115,28 @@ func main() {
 	// 分发命令
 	command := args[0]
 	switch command {
+	case "login":
+		cmdLogin(args[1:]...)
+	case "register":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "用法: aether-cli register <apply|add|delete|apply_list|info>\n")
+			os.Exit(1)
+		}
+		switch args[1] {
+		case "apply":
+			cmdRegisterApply(args[2:]...)
+		case "add":
+			cmdRegisterAdd(args[2:]...)
+		case "delete":
+			cmdRegisterDelete(args[2:]...)
+		case "apply_list":
+			cmdRegisterApplyList()
+		case "info":
+			cmdRegisterInfo()
+		default:
+			fmt.Fprintf(os.Stderr, "未知子命令: %s\n", args[1])
+			os.Exit(1)
+		}
 	case "ping":
 		cmdPing()
 	case "clients":
@@ -167,6 +191,12 @@ func printUsage() {
   aether-cli [flags] <command> [args...]
 
 命令:
+  login                         登录获取 JWT Token
+  register apply                提交注册申请
+  register add                  审核通过并签发证书
+  register delete               吊销客户端证书
+  register apply_list           查看待审核列表
+  register info                 查看已通过列表
   ping                          健康检查
   clients                       列出所有客户端
   info <client-id>              获取客户端代理信息
@@ -174,31 +204,26 @@ func printUsage() {
   create <client-id> [options]  创建代理映射
   close <port>                  关闭代理
   relay <落地端A> <服务端B> [options]  A监听端口 → B的服务端口
-  relay-sessions                  列出中继会话
-  relay-close <session-id>        关闭中继会话
+  relay-sessions                列出中继会话
+  relay-close <session-id>      关闭中继会话
   help                          显示帮助
 
-创建代理选项:
-  -remote <port>      服务端暴露端口 (必填)
-  -local <port>       客户端本地端口 (必填)
-  -protocol <proto>   协议类型: tcp, udp, websocket (默认 tcp)
-  -bind <addr>        服务端绑定地址 (默认 0.0.0.0)
-  -local-ip <ip>      客户端本地 IP (默认 127.0.0.1)
+注册申请选项:
+  -id <client-id>       客户端 ID (必填)
+  -pubkey <path>        公钥文件路径 (必填)
+  -token <token>        认证 token (必填)
 
-创建中继选项:
-  -source-port <port>     A端监听端口 (必填)，A 的用户访问此端口
-  -target-port <port>     B端服务端口 (必填)，B 的真实服务端口
-  -protocol <proto>       协议类型: tcp, udp, websocket (默认 tcp)
-  -target-ip <ip>         B端服务 IP (默认 127.0.0.1)
-  -source-ip <ip>         A端监听 IP (默认 0.0.0.0)
+审核通过选项:
+  -id <client-id>       客户端 ID (必填)
 
-示例: A想访问B的80端口，A监听8090:
-  aether-cli relay client-A client-B -source-port 8090 -target-port 80
+吊销客户端选项:
+  -id <client-id>       客户端 ID (必填)
+  -prefix <prefix>      证书前40字符 (必填，用于二次确认)
 
 全局选项:
   -config <path>      配置文件路径 (默认 ~/.aether_config.json)
   -json               JSON 输出模式
-  -version			  版本
+  -version            版本
 `)
 	os.Exit(0)
 }
@@ -225,9 +250,6 @@ func loadConfig(path string) (*CLIConfig, error) {
 	if cfg.Server == "" {
 		return nil, fmt.Errorf("server 地址不能为空")
 	}
-	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("api_key 不能为空")
-	}
 
 	// 确保 server 地址格式正确
 	cfg.Server = strings.TrimRight(cfg.Server, "/")
@@ -252,7 +274,13 @@ func apiRequest(method, path string, body interface{}) (*Response, error) {
 		return nil, fmt.Errorf("创建请求: %w", err)
 	}
 
-	req.Header.Set("X-API-KEY", cfg.APIKey)
+	// 使用 JWT Token 认证
+	if cfg.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+cfg.Token)
+	} else {
+		req.Header.Set("X-API-KEY", cfg.APIKey)
+	}
+
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -715,4 +743,257 @@ func cmdRelayClose(sessionID string) {
 		os.Exit(1)
 	}
 	fmt.Printf("中继会话已关闭 (%s)\n", sessionID)
+}
+
+func cmdLogin(args ...string) {
+	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	serverURL := fs.String("server", "", "服务器地址")
+	apiKey := fs.String("api-key", "", "API 密钥")
+
+	fs.Parse(args)
+
+	if *serverURL == "" || *apiKey == "" {
+		fmt.Fprintf(os.Stderr, "错误: -server 和 -api-key 为必填参数\n")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	url := *serverURL + "/api/v1/login"
+	body := map[string]string{
+		"api_key": *apiKey,
+	}
+	bodyData, _ := json.Marshal(body)
+
+	resp, err := http.Post(url, "application/json", bytes.NewReader(bodyData))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "请求失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	var result struct {
+		Code int `json:"code"`
+		Data struct {
+			Token     string `json:"token"`
+			ExpiresIn int64  `json:"expires_in"`
+		} `json:"data"`
+	}
+	json.Unmarshal(respBody, &result)
+
+	if result.Code != 0 {
+		fmt.Fprintf(os.Stderr, "登录失败\n")
+		os.Exit(1)
+	}
+
+	cfg.Server = *serverURL
+	cfg.Token = result.Data.Token
+	cfg.TokenExp = time.Now().Unix() + result.Data.ExpiresIn
+
+	configData, _ := json.MarshalIndent(cfg, "", "  ")
+	os.WriteFile(configPath, configData, 0600)
+
+	fmt.Println("登录成功")
+}
+
+func cmdRegisterApply(args ...string) {
+	fs := flag.NewFlagSet("register-apply", flag.ExitOnError)
+	clientID := fs.String("id", "", "客户端 ID")
+	pubKey := fs.String("pubkey", "", "公钥文件路径")
+	token := fs.String("token", "", "认证 token")
+
+	fs.Parse(args)
+
+	if *clientID == "" || *pubKey == "" || *token == "" {
+		fmt.Fprintf(os.Stderr, "错误: -id、-pubkey、-token 为必填参数\n")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	pubKeyData, err := os.ReadFile(*pubKey)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "读取公钥失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	body := map[string]string{
+		"client_id":  *clientID,
+		"public_key": string(pubKeyData),
+		"token":      *token,
+	}
+
+	resp, err := apiRequest("POST", "/api/v1/register_apply", body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "请求失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	if resp.Code != 0 {
+		fmt.Fprintf(os.Stderr, "申请失败 [%d]: %s\n", resp.Code, resp.Msg)
+		os.Exit(1)
+	}
+
+	fmt.Printf("申请已提交，等待管理员审核\n")
+	fmt.Printf("客户端 ID: %s\n", *clientID)
+}
+
+func cmdRegisterAdd(args ...string) {
+	fs := flag.NewFlagSet("register-add", flag.ExitOnError)
+	clientID := fs.String("id", "", "客户端 ID")
+
+	fs.Parse(args)
+
+	if *clientID == "" {
+		fmt.Fprintf(os.Stderr, "错误: -id 为必填参数\n")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	body := map[string]string{
+		"client_id": *clientID,
+	}
+
+	resp, err := apiRequest("POST", "/api/v1/register_add", body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "请求失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	if resp.Code != 0 {
+		fmt.Fprintf(os.Stderr, "审核失败 [%d]: %s\n", resp.Code, resp.Msg)
+		os.Exit(1)
+	}
+
+	var data struct {
+		Certificate string `json:"certificate"`
+		CertPrefix  string `json:"cert_prefix"`
+		ClientID    string `json:"client_id"`
+	}
+	json.Unmarshal(resp.Data, &data)
+
+	outFile := *clientID + ".crt"
+	err = os.WriteFile(outFile, []byte(data.Certificate), 0600)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "保存证书失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("审核通过，证书已签发\n")
+	fmt.Printf("客户端 ID: %s\n", data.ClientID)
+	fmt.Printf("证书前缀: %s\n", data.CertPrefix)
+	fmt.Printf("证书已保存至: %s\n", outFile)
+	fmt.Println("请妥善保管证书前缀，吊销时需要二次确认")
+}
+
+func cmdRegisterDelete(args ...string) {
+	fs := flag.NewFlagSet("register-delete", flag.ExitOnError)
+	clientID := fs.String("id", "", "客户端 ID")
+	prefix := fs.String("prefix", "", "证书前40字符")
+
+	fs.Parse(args)
+
+	if *clientID == "" || *prefix == "" {
+		fmt.Fprintf(os.Stderr, "错误: -id、-prefix 为必填参数\n")
+		fs.Usage()
+		os.Exit(1)
+	}
+
+	body := map[string]string{
+		"client_id":   *clientID,
+		"cert_prefix": *prefix,
+	}
+
+	resp, err := apiRequest("POST", "/api/v1/register_delete", body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "请求失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	if resp.Code != 0 {
+		fmt.Fprintf(os.Stderr, "吊销失败 [%d]: %s\n", resp.Code, resp.Msg)
+		os.Exit(1)
+	}
+
+	fmt.Printf("客户端 %s 已移除\n", *clientID)
+}
+
+func cmdRegisterApplyList() {
+	resp, err := apiRequest("GET", "/api/v1/register_apply_list", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "请求失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	if jsonOutput {
+		printJSON(resp)
+		return
+	}
+
+	if resp.Code != 0 {
+		fmt.Fprintf(os.Stderr, "错误 [%d]: %s\n", resp.Code, resp.Msg)
+		os.Exit(1)
+	}
+
+	var data struct {
+		Applications []struct {
+			ClientID  string `json:"client_id"`
+			CreatedAt int64  `json:"created_at"`
+		} `json:"applications"`
+	}
+	json.Unmarshal(resp.Data, &data)
+
+	if len(data.Applications) == 0 {
+		fmt.Println("没有待审核的申请")
+		return
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "客户端 ID\t申请时间\n")
+	fmt.Fprintf(w, "----------\t--------\n")
+	for _, app := range data.Applications {
+		createdTime := time.Unix(app.CreatedAt, 0).Format("2006-01-02 15:04:05")
+		fmt.Fprintf(w, "%s\t%s\n", app.ClientID, createdTime)
+	}
+	w.Flush()
+}
+
+func cmdRegisterInfo() {
+	resp, err := apiRequest("GET", "/api/v1/register_info", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "请求失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	if jsonOutput {
+		printJSON(resp)
+		return
+	}
+
+	if resp.Code != 0 {
+		fmt.Fprintf(os.Stderr, "错误 [%d]: %s\n", resp.Code, resp.Msg)
+		os.Exit(1)
+	}
+
+	var data struct {
+		Clients []struct {
+			ClientID   string `json:"client_id"`
+			CertPrefix string `json:"cert_prefix"`
+			ApprovedAt int64  `json:"approved_at"`
+		} `json:"clients"`
+	}
+	json.Unmarshal(resp.Data, &data)
+
+	if len(data.Clients) == 0 {
+		fmt.Println("没有已通过的客户端")
+		return
+	}
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "客户端 ID\t证书前缀\t通过时间\n")
+	fmt.Fprintf(w, "----------\t----------\t--------\n")
+	for _, c := range data.Clients {
+		approvedTime := time.Unix(c.ApprovedAt, 0).Format("2006-01-02 15:04:05")
+		fmt.Fprintf(w, "%s\t%s\t%s\n", c.ClientID, c.CertPrefix, approvedTime)
+	}
+	w.Flush()
 }

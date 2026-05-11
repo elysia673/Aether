@@ -1,14 +1,19 @@
 package config
 
 import (
+	"Aether/Aether_Client/register"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 type ClientConfig struct {
 	ServerURL             string `json:"server_url"`
 	ClientToken           string `json:"client_token"`
 	ClientID              string `json:"client_id"`
+	PrivateKeyPath        string `json:"private_key_path"`
+	PublicKeyPath         string `json:"public_key_path"`
+	CertificatePath       string `json:"certificate_path"`
 	UseHTTP               bool   `json:"use_http"`
 	TLSSNI                string `json:"tls_sni"`
 	Origin                string `json:"origin"`
@@ -18,6 +23,9 @@ type ClientConfig struct {
 func defaultClientConfig() *ClientConfig {
 	return &ClientConfig{
 		ClientID:              "raspberry-pi-01",
+		PrivateKeyPath:        "./data/client.key",
+		PublicKeyPath:         "./data/client.pub",
+		CertificatePath:       "./data/server.crt",
 		ReconnectDelaySeconds: 5,
 	}
 }
@@ -46,5 +54,22 @@ func LoadClient(path string) (*ClientConfig, error) {
 		return nil, fmt.Errorf("client_token is required (set in config file or AETHER_CLIENT_TOKEN env)")
 	}
 
+	// 创建目录
+	dataDir := filepath.Dir(cfg.PrivateKeyPath)
+	os.MkdirAll(dataDir, 0755)
+
+	// 检查密钥对是否存在，否则生成
+	if !fileExists(cfg.PrivateKeyPath) || !fileExists(cfg.PublicKeyPath) {
+		err := register.GenerateKeyPair(cfg.PrivateKeyPath, cfg.PublicKeyPath)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	return cfg, nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return !os.IsNotExist(err)
 }
