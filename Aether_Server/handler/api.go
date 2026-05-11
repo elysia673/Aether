@@ -211,6 +211,6 @@ func (h *APIHandler) HandleLogin(c *gin.Context) {
 
 	c.JSON(http.StatusOK, model.Success(LoginResponse{
 		Token:     token,
-		ExpiresIn: 86400,
+		ExpiresIn: 365 * 24 * 3600,
 	}))
 }

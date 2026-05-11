@@ -210,7 +210,7 @@ func (h *RelayHandler) HandleRelayWS(c *gin.Context) {
 		return
 	}
 
-	ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	ws, err := newUpgrader(h.serverHost).Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("中继 WebSocket 升级错误: %v", err)
 		return

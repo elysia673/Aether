@@ -15,7 +15,7 @@ import (
 )
 
 func (h *WSHandler) HandleTunnelWS(c *gin.Context) {
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	conn, err := newUpgrader(h.domain).Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("隧道 WebSocket 升级错误: %v", err)
 		return

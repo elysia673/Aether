@@ -171,6 +171,7 @@ func restoreClientProxies(cfg *config.ServerConfig, clientMgr *manager.ClientMan
 
 func main() {
 	middleware.CleanupExpiredRegistrations()
+	middleware.InitJWTSecret()
 
 	// 定义命令行参数
 	configPath := flag.String("config", "config.json", "path to config file")
@@ -248,7 +249,11 @@ func main() {
 		}))
 	})
 
-	r.POST("/api/v1/login", apiHandler.HandleLogin)
+	login := r.Group("/api/v1")
+	login.Use(middleware.RateLimit(10))
+	{
+		login.POST("/login", apiHandler.HandleLogin)
+	}
 
 	// 公开端点（不需要认证）
 	public := r.Group("/api/v1")
@@ -277,7 +282,7 @@ func main() {
 	}
 
 	// WebSocket 端点
-	wsHandler := handler.NewWSHandler(clientMgr, registry)
+	wsHandler := handler.NewWSHandler(clientMgr, registry, cfg.Server.Domain)
 	r.GET("/ws", wsHandler.Handle)              // 客户端注册连接
 	r.GET("/tunnel", wsHandler.HandleTunnelWS)  // WebSocket 隧道
 	r.GET("/relay", relayHandler.HandleRelayWS) // 中继 WebSocket

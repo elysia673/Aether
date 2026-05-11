@@ -220,6 +220,22 @@ func printUsage() {
   -id <client-id>       客户端 ID (必填)
   -prefix <prefix>      证书前40字符 (必填，用于二次确认)
 
+create 选项:
+  -remote <port>        服务端暴露端口 (必填)
+  -local <port>         客户端本地端口 (必填)
+  -protocol <type>      协议类型: tcp, udp, websocket (默认 tcp)
+  -bind <addr>          服务端绑定地址 (默认 0.0.0.0)
+  -local-ip <ip>        客户端本地 IP (默认 127.0.0.1)
+
+relay 选项:
+  -source-port <port>   源端本地监听端口 (必填)
+  -target-port <port>   目标端本地服务端口 (必填)
+  -protocol <type>      协议类型: tcp, udp, websocket (默认 tcp)
+  -target-ip <ip>       目标端本地 IP (默认 127.0.0.1)
+  -source-ip <ip>       源端监听 IP (默认 0.0.0.0)
+  -source-peer <addr>   源端直连对端地址 (ip:port)，同 LAN 时指定内网 IP
+  -target-peer <addr>   目标端直连对端地址 (ip:port)，同 LAN 时指定内网 IP
+
 全局选项:
   -config <path>      配置文件路径 (默认 ~/.aether_config.json)
   -json               JSON 输出模式

@@ -86,7 +86,7 @@ func (r *Registry) Approve(clientID string) ([]byte, error) {
 	}
 
 	// 签发证书
-	certPEM, err := SignClientCertificate([]byte(record.PublicKey), clientID, 30)
+	certPEM, err := SignClientCertificate([]byte(record.PublicKey), clientID, 365)
 	if err != nil {
 		return nil, err
 	}

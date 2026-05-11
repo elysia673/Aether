@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -14,9 +15,18 @@ import (
 )
 
 var (
-	jwtSecret   = []byte("aether-jwt-secret-key-change-in-production")
-	registerDir = "./data/registered_keys" // 记录已注册的 API Key
+	jwtSecret   []byte
+	registerDir = "./data/registered_keys"
 )
+
+func InitJWTSecret() {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		log.Fatalf("生成 JWT 密钥失败: %v", err)
+	}
+	jwtSecret = b
+	log.Println("JWT 密钥已随机生成（重启后旧 token 失效）")
+}
 
 type Claims struct {
 	APIKey string `json:"api_key"`
@@ -66,8 +76,8 @@ func CleanupExpiredRegistrations() {
 			continue
 		}
 
-		// 删除超过 48 小时的注册文件（留 24h 缓冲）
-		if time.Since(info.ModTime()) > 48*time.Hour {
+		// 删除超过 1 年的注册文件
+		if time.Since(info.ModTime()) > 365*24*time.Hour {
 			os.Remove(path)
 		}
 	}
@@ -86,7 +96,7 @@ func GenerateToken(apiKey string) (string, error) {
 	claims := Claims{
 		APIKey: apiKey,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(365 * 24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	}
