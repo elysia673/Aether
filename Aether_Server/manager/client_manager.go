@@ -14,10 +14,10 @@ import (
 
 // Config 客户端管理器配置
 type Config struct {
-	ClientToken   string                                  // 客户端注册令牌
-	PublicIP      string                                  // 服务器公网 IP
-	OnClientReady func(clientID string, conn *Connection) // 客户端注册完成回调
-	OnP2PMessage  func(clientID string, msg interface{})  // P2P 消息回调
+	ClientToken    string                                  // 客户端注册令牌
+	PublicIP       string                                  // 服务器公网 IP
+	OnClientReady  func(clientID string, conn *Connection) // 客户端注册完成回调
+	OnRelayMessage func(clientID string, msg interface{})  // 中继消息回调
 }
 
 // ClientManager 管理所有客户端连接
@@ -52,15 +52,15 @@ func (m *ClientManager) SetOnClientReady(callback func(string, *Connection)) {
 	m.config.OnClientReady = callback
 }
 
-// SetOnP2PMessage 设置 P2P 消息回调
-func (m *ClientManager) SetOnP2PMessage(callback func(string, interface{})) {
-	m.config.OnP2PMessage = callback
+// SetOnRelayMessage 设置中继消息回调
+func (m *ClientManager) SetOnRelayMessage(callback func(string, interface{})) {
+	m.config.OnRelayMessage = callback
 }
 
-// DispatchP2PMessage 分发 P2P 消息
-func (m *ClientManager) DispatchP2PMessage(clientID string, msg interface{}) {
-	if m.config.OnP2PMessage != nil {
-		m.config.OnP2PMessage(clientID, msg)
+// DispatchRelayMessage 分发中继消息
+func (m *ClientManager) DispatchRelayMessage(clientID string, msg interface{}) {
+	if m.config.OnRelayMessage != nil {
+		m.config.OnRelayMessage(clientID, msg)
 	}
 }
 

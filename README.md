@@ -10,6 +10,7 @@
 - **心跳检测**: WebSocket ping/pong + TCP keepalive
 - **安全认证**: 魔数协议头 + 令牌认证
 - **配置灵活**: JSON 配置文件 + 环境变量回退
+- **客户端中继**: 支持两个客户端之间通过服务器中继连接
 
 ## 架构
 
@@ -154,11 +155,29 @@ UDP 隧道建立：
 3. 服务端注册 UDP 隧道
 4. 后续数据包直接转发
 
+### 6. 客户端中继
+
+```
+User           Server              Client A            Client B
+  │               │                    │                   │
+  │── POST ──────>│                    │                   │
+  │  /relay/      │                    │                   │
+  │  connect      │                    │                   │
+  │               │── relay signal ───>│                   │
+  │               │── relay signal ───────────────────────>│
+  │               │                    │                   │
+  │               │<═══════════════════╪═════════════════>│
+  │               │      WebSocket 中继连接               │
+  │               │                    │                   │
+  │               │                    │── 本地连接 ──────>│
+  │               │                    │   (通过中继)      │
+```
+
 ## 快速开始
 
 ### 1. 配置服务端
 
-创建 `Server/config.json`（可参考 `Server/config.example.json`）:
+创建 `Aether_Server/config.json`（可参考 `Aether_Server/config.example.json`）:
 
 ```json
 {
@@ -184,14 +203,14 @@ UDP 隧道建立：
 ### 2. 启动服务端
 
 ```bash
-cd Server
+cd Aether_Server
 go run main.go -config config.json
 ```
 
 ### 3. 启动客户端
 
 ```bash
-cd Client
+cd Aether_Client
 export AETHER_WS_URL="wss://your-domain.com:9909/ws"
 export AETHER_CLIENT_TOKEN="your-client-token"
 go run main.go -id my-device
@@ -273,6 +292,9 @@ aether-cli info my-device                 # 查看代理信息
 aether-cli proxies                        # 列出所有代理
 aether-cli create my-device -remote 8080 -local 8080 -protocol tcp
 aether-cli close 8080                     # 关闭代理
+aether-cli relay client-A client-B -source-port 8090 -target-port 80  # 创建中继
+aether-cli relay-sessions                 # 列出中继会话
+aether-cli relay-close <session-id>       # 关闭中继会话
 
 # JSON 输出模式
 aether-cli -json clients
@@ -305,6 +327,9 @@ aether-cli -json info my-device
 | `POST` | `/api/v1/clients/:id/proxy` | 创建代理映射 |
 | `GET` | `/api/v1/proxies` | 列出所有代理 |
 | `DELETE` | `/api/v1/proxies/:port` | 关闭代理 |
+| `POST` | `/api/v1/relay/connect` | 创建中继连接 |
+| `GET` | `/api/v1/relay/sessions` | 列出中继会话 |
+| `DELETE` | `/api/v1/relay/sessions/:id` | 关闭中继会话 |
 
 ## 协议说明
 
@@ -353,36 +378,43 @@ aether-cli -json info my-device
 
 ```
 Aether/
-├── Server/                 # 服务端
-│   ├── main.go            # 入口
-│   ├── config.example.json # 配置示例
-│   ├── config/            # 配置管理
-│   ├── handler/           # 请求处理器
-│   │   ├── api.go        # REST API
-│   │   ├── ws.go         # WebSocket 注册
-│   │   ├── tunnel_ws.go  # WebSocket 隧道
-│   │   ├── tcp_proxy.go  # TCP 代理
-│   │   └── udp_proxy.go  # UDP 代理
-│   ├── manager/           # 连接管理
+├── Aether_Server/              # 服务端
+│   ├── main.go                 # 入口
+│   ├── config.example.json     # 配置示例
+│   ├── handler/                # 请求处理器
+│   │   ├── api.go              # REST API
+│   │   ├── ws.go               # WebSocket 注册
+│   │   ├── tunnel_ws.go        # WebSocket 隧道
+│   │   ├── tcp_proxy.go        # TCP 代理
+│   │   ├── udp_proxy.go        # UDP 代理
+│   │   └── relay.go            # 客户端中继
+│   ├── manager/                # 连接管理
 │   │   ├── client_manager.go
 │   │   ├── client_table.go
 │   │   └── connection.go
-│   ├── middleware/         # 中间件
-│   └── model/             # 数据模型
-├── Client/                 # 客户端
-│   ├── main.go            # 入口
-│   ├── client.go          # 客户端核心
-│   ├── handler.go         # 消息处理
-│   ├── ports.go           # 端口扫描
-│   └── utils.go           # 工具函数
-├── cmd/                    # 命令行工具
-│   └── aether-cli/        # CLI 管理工具
-│       ├── main.go        # 入口
+│   ├── middleware/              # 中间件
+│   └── storage/                # 持久化存储
+├── Aether_Client/              # 客户端
+│   ├── main.go                 # 入口
+│   ├── client.go               # 客户端核心
+│   ├── conn/                   # WebSocket 连接
+│   ├── handler/                # 消息处理
+│   │   ├── handler.go          # 消息分发
+│   │   └── relay.go            # 中继处理
+│   ├── ports.go                # 端口扫描
+│   └── utils.go                # 工具函数
+├── Aether_Cmd/                 # 命令行工具
+│   └── aether-cli/             # CLI 管理工具
+│       ├── main.go             # 入口
 │       └── config.example.json
-└── tools/                  # 共享工具
-    ├── mux/               # 多路复用
-    ├── proto/             # 协议定义
-    └── wsconn/            # WebSocket 适配
+├── common/                     # 共享代码
+│   ├── config/                 # 配置管理
+│   ├── model/                  # 数据模型
+│   ├── mux/                    # 多路复用
+│   ├── proto/                  # 协议定义
+│   ├── wsconn/                 # WebSocket 适配
+│   └── relay/                  # 中继打洞
+└── build/                      # 构建产物
 ```
 
 ## License

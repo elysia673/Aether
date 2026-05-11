@@ -124,8 +124,11 @@ func (h *APIHandler) CreateProxy(c *gin.Context) {
 	if req.Protocol == "websocket" {
 		table.StoreWSToken(token, fmt.Sprintf("%s-%d", clientID, req.RemotePort))
 		go h.StartWSProxy(req.RemotePort, req.BindAddr, table, token)
+	} else if req.Protocol == "udp" {
+		// UDP 协议使用专用的 UDP 代理
+		go h.startUDPProxy(req.RemotePort, req.BindAddr, table, token)
 	} else {
-		// 存储隧道 token（用于隧道端口认证）
+		// TCP 协议使用隧道代理
 		table.StoreTunnelToken(token, fmt.Sprintf("%s-%d", clientID, req.RemotePort))
 		go h.StartTCPProxy(req.RemotePort, req.BindAddr, table, token)
 	}

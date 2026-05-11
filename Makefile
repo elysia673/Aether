@@ -6,7 +6,16 @@ BUILD_DIR := build
 
 GO := go
 GOFLAGS := -v
-LDFLAGS := -s -w -extldflags '-static'
+
+VERSION ?= dev
+BUILD_TIME := $(shell date '+%Y-%m-%d_%H:%M:%S')
+GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
+LDFLAGS := -s -w -extldflags '-static' \
+	-X main.Version=$(VERSION) \
+	-X 'main.BuildTime=$(BUILD_TIME)' \
+	-X 'main.GitCommit=$(GIT_COMMIT)'
+
 CGO_ENABLED := 0
 
 DARWIN_GOOS := darwin

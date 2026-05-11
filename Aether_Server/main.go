@@ -29,6 +29,10 @@ var (
 	GitCommit = "unknown"
 )
 
+func printVersion() {
+	fmt.Printf("Aether_Server %s (%s) %s\n", Version, GitCommit, BuildTime)
+}
+
 // getPublicIP 自动获取服务器公网 IP
 // 优先使用环境变量 AETHER_PUBLIC_IP，否则通过外部服务获取
 func getPublicIP() string {
@@ -166,8 +170,14 @@ func restoreClientProxies(cfg *config.ServerConfig, clientMgr *manager.ClientMan
 func main() {
 	// 定义命令行参数
 	configPath := flag.String("config", "config.json", "path to config file")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	// 解析命令行参数
 	flag.Parse()
+
+	if *showVersion {
+		printVersion()
+		return
+	}
 
 	// 加载配置文件
 	cfg, err := config.LoadServer(*configPath)
@@ -198,16 +208,16 @@ func main() {
 	// 初始化 API 处理器
 	apiHandler := handler.NewAPIHandler(clientMgr, cfg.Server.Domain, cfg.Server.TunnelPort, store)
 
-	// 初始化 P2P 处理器
-	p2pHandler := handler.NewP2PHandler(clientMgr, cfg.Server.Domain)
+	// 初始化中继处理器
+	relayHandler := handler.NewRelayHandler(clientMgr, cfg.Server.Domain)
 
 	// 设置客户端注册回调
 	clientMgr.SetOnClientReady(restoreClientProxies(cfg, clientMgr, store, apiHandler))
 
-	// 设置 P2P 消息回调
-	clientMgr.SetOnP2PMessage(func(clientID string, msg interface{}) {
+	// 设置中继消息回调
+	clientMgr.SetOnRelayMessage(func(clientID string, msg interface{}) {
 		if wsMsg, ok := msg.(*model.WSMessage); ok {
-			p2pHandler.HandleClientStatus(wsMsg, clientID)
+			relayHandler.HandleClientStatus(wsMsg, clientID)
 		}
 	})
 
@@ -232,16 +242,16 @@ func main() {
 		api.POST("/clients/:id/proxy", apiHandler.CreateProxy)   // 创建代理映射
 		api.GET("/proxies", apiHandler.ListProxies)              // 列出所有代理
 		api.DELETE("/proxies/:port", apiHandler.CloseProxy)      // 关闭代理
-		api.POST("/p2p/connect", p2pHandler.CreateP2P)           // 创建 P2P 端对端连接
-		api.GET("/p2p/sessions", p2pHandler.ListSessions)        // 列出 P2P 会话
-		api.DELETE("/p2p/sessions/:id", p2pHandler.CloseSession) // 关闭 P2P 会话
+		api.POST("/relay/connect", relayHandler.CreateRelay)           // 创建中继连接
+		api.GET("/relay/sessions", relayHandler.ListSessions)        // 列出中继会话
+		api.DELETE("/relay/sessions/:id", relayHandler.CloseSession) // 关闭中继会话
 	}
 
 	// WebSocket 端点
 	wsHandler := handler.NewWSHandler(clientMgr)
 	r.GET("/ws", wsHandler.Handle)                // 客户端注册连接
 	r.GET("/tunnel", wsHandler.HandleTunnelWS)    // WebSocket 隧道
-	r.GET("/p2p-relay", p2pHandler.HandleRelayWS) // P2P 中继 WebSocket
+	r.GET("/relay", relayHandler.HandleRelayWS) // 中继 WebSocket
 
 	// 启动隧道监听器
 	if cfg.Server.TunnelPort > 0 {

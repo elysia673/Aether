@@ -35,7 +35,7 @@ type ClientTable struct {
 	tunnelTokens map[string]string // token -> key (用于隧道端口认证)
 	tunnelMu     sync.RWMutex
 
-	udpTunnels map[string]*net.UDPConn
+	udpTunnels map[string]net.Conn
 	udpMu      sync.RWMutex
 }
 
@@ -52,7 +52,7 @@ func NewClientTable(clientID string, conn *Connection, remoteAddr string, connec
 		pending:      make(map[string]bool),
 		wsTokens:     make(map[string]string),
 		tunnelTokens: make(map[string]string),
-		udpTunnels:   make(map[string]*net.UDPConn),
+		udpTunnels:   make(map[string]net.Conn),
 	}
 }
 
@@ -232,7 +232,7 @@ func (t *ClientTable) RemoveTunnelTokenByKey(key string) {
 
 // UDP 隧道操作
 
-func (t *ClientTable) SetUDPTunnel(key string, conn *net.UDPConn) {
+func (t *ClientTable) SetUDPTunnel(key string, conn net.Conn) {
 	t.udpMu.Lock()
 	if old := t.udpTunnels[key]; old != nil {
 		old.Close()
@@ -241,7 +241,7 @@ func (t *ClientTable) SetUDPTunnel(key string, conn *net.UDPConn) {
 	t.udpMu.Unlock()
 }
 
-func (t *ClientTable) GetUDPTunnel(key string) *net.UDPConn {
+func (t *ClientTable) GetUDPTunnel(key string) net.Conn {
 	t.udpMu.RLock()
 	defer t.udpMu.RUnlock()
 	return t.udpTunnels[key]

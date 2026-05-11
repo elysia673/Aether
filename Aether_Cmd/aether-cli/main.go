@@ -21,6 +21,12 @@ import (
 	"time"
 )
 
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+	GitCommit = "unknown"
+)
+
 // CLIConfig CLI 配置
 type CLIConfig struct {
 	Server   string `json:"server"`   // 服务端地址，如 https://your-server.com:9909
@@ -36,11 +42,16 @@ type Response struct {
 }
 
 var (
-	configPath string
-	jsonOutput bool
-	cfg        *CLIConfig
-	httpClient *http.Client
+	configPath  string
+	jsonOutput  bool
+	showVersion bool
+	cfg         *CLIConfig
+	httpClient  *http.Client
 )
+
+func printVersion() {
+	fmt.Printf("Aether Client %s (%s) %s\n", Version, GitCommit, BuildTime)
+}
 
 func init() {
 	home := getHomeDir()
@@ -48,13 +59,20 @@ func init() {
 
 	flag.StringVar(&configPath, "config", defaultConfig, "配置文件路径")
 	flag.BoolVar(&jsonOutput, "json", false, "JSON 输出模式")
+	flag.BoolVar(&showVersion, "version", false, "打印版本")
 
 	// 自定义帮助信息
 	flag.Usage = printUsage
 }
 
 func main() {
+
 	flag.Parse()
+
+	if showVersion {
+		printVersion()
+		return
+	}
 
 	args := flag.Args()
 	if len(args) == 0 {
@@ -119,20 +137,20 @@ func main() {
 			os.Exit(1)
 		}
 		cmdCloseProxy(args[1])
-	case "p2p":
+	case "relay":
 		if len(args) < 2 {
-			fmt.Fprintf(os.Stderr, "用法: aether-cli p2p <落地端A> <服务端B> [options]\n")
+			fmt.Fprintf(os.Stderr, "用法: aether-cli relay <落地端A> <服务端B> [options]\n")
 			os.Exit(1)
 		}
-		cmdP2PConnect(args[1], args[2], args[3:])
-	case "p2p-sessions":
-		cmdP2PSessions()
-	case "p2p-close":
+		cmdRelayConnect(args[1], args[2], args[3:])
+	case "relay-sessions":
+		cmdRelaySessions()
+	case "relay-close":
 		if len(args) < 2 {
-			fmt.Fprintf(os.Stderr, "用法: aether-cli p2p-close <session-id>\n")
+			fmt.Fprintf(os.Stderr, "用法: aether-cli relay-close <session-id>\n")
 			os.Exit(1)
 		}
-		cmdP2PClose(args[1])
+		cmdRelayClose(args[1])
 	case "help":
 		printUsage()
 	default:
@@ -155,9 +173,9 @@ func printUsage() {
   proxies                       列出所有代理
   create <client-id> [options]  创建代理映射
   close <port>                  关闭代理
-  p2p <落地端A> <服务端B> [options]  A监听端口 → B的服务端口
-  p2p-sessions                  列出 P2P 会话
-  p2p-close <session-id>        关闭 P2P 会话
+  relay <落地端A> <服务端B> [options]  A监听端口 → B的服务端口
+  relay-sessions                  列出中继会话
+  relay-close <session-id>        关闭中继会话
   help                          显示帮助
 
 创建代理选项:
@@ -167,7 +185,7 @@ func printUsage() {
   -bind <addr>        服务端绑定地址 (默认 0.0.0.0)
   -local-ip <ip>      客户端本地 IP (默认 127.0.0.1)
 
-创建 P2P 选项:
+创建中继选项:
   -source-port <port>     A端监听端口 (必填)，A 的用户访问此端口
   -target-port <port>     B端服务端口 (必填)，B 的真实服务端口
   -protocol <proto>       协议类型: tcp, udp, websocket (默认 tcp)
@@ -175,20 +193,12 @@ func printUsage() {
   -source-ip <ip>         A端监听 IP (默认 0.0.0.0)
 
 示例: A想访问B的80端口，A监听8090:
-  aether-cli p2p client-A client-B -source-port 8090 -target-port 80
+  aether-cli relay client-A client-B -source-port 8090 -target-port 80
 
 全局选项:
   -config <path>      配置文件路径 (默认 ~/.aether_config.json)
   -json               JSON 输出模式
-
-配置文件示例 (~/.aether_config.json):
-  {
-     "server": "https://your-server.com:9909",
-    "api_key": "your-api-key",
-    "insecure": false
-  }
-
-认证方式: X-API-KEY 请求头
+  -version			  版本
 `)
 	os.Exit(0)
 }
@@ -576,8 +586,8 @@ func cmdCloseProxy(portStr string) {
 	fmt.Printf("代理已关闭 (端口 %s)\n", portStr)
 }
 
-func cmdP2PConnect(sourceID, targetID string, args []string) {
-	fs := flag.NewFlagSet("p2p", flag.ExitOnError)
+func cmdRelayConnect(sourceID, targetID string, args []string) {
+	fs := flag.NewFlagSet("relay", flag.ExitOnError)
 
 	sourcePort := fs.Int("source-port", 0, "源端本地监听端口")
 	targetPort := fs.Int("target-port", 0, "目标端本地服务端口")
@@ -611,7 +621,7 @@ func cmdP2PConnect(sourceID, targetID string, args []string) {
 		body["target_peer_addr"] = *targetPeer
 	}
 
-	resp, err := apiRequest("POST", "/api/v1/p2p/connect", body)
+	resp, err := apiRequest("POST", "/api/v1/relay/connect", body)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "请求失败: %v\n", err)
 		os.Exit(1)
@@ -635,15 +645,15 @@ func cmdP2PConnect(sourceID, targetID string, args []string) {
 	}
 	json.Unmarshal(resp.Data, &data)
 
-	fmt.Printf("P2P 连接已创建\n")
+	fmt.Printf("中继连接已创建\n")
 	fmt.Printf("会话 ID: %s\n", data.SessionID)
 	fmt.Printf("源客户端: %s\n", data.SourceClient)
 	fmt.Printf("目标客户端: %s\n", data.TargetClient)
 	fmt.Printf("协议: %s\n", data.Protocol)
 }
 
-func cmdP2PSessions() {
-	resp, err := apiRequest("GET", "/api/v1/p2p/sessions", nil)
+func cmdRelaySessions() {
+	resp, err := apiRequest("GET", "/api/v1/relay/sessions", nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "请求失败: %v\n", err)
 		os.Exit(1)
@@ -677,7 +687,7 @@ func cmdP2PSessions() {
 	json.Unmarshal(resp.Data, &data)
 
 	if len(data.Sessions) == 0 {
-		fmt.Println("没有活跃的 P2P 会话")
+		fmt.Println("没有活跃的中继会话")
 		return
 	}
 
@@ -694,8 +704,8 @@ func cmdP2PSessions() {
 	w.Flush()
 }
 
-func cmdP2PClose(sessionID string) {
-	resp, err := apiRequest("DELETE", fmt.Sprintf("/api/v1/p2p/sessions/%s", sessionID), nil)
+func cmdRelayClose(sessionID string) {
+	resp, err := apiRequest("DELETE", fmt.Sprintf("/api/v1/relay/sessions/%s", sessionID), nil)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "请求失败: %v\n", err)
 		os.Exit(1)
@@ -704,5 +714,5 @@ func cmdP2PClose(sessionID string) {
 		fmt.Fprintf(os.Stderr, "错误 [%d]: %s\n", resp.Code, resp.Msg)
 		os.Exit(1)
 	}
-	fmt.Printf("P2P 会话已关闭 (%s)\n", sessionID)
+	fmt.Printf("中继会话已关闭 (%s)\n", sessionID)
 }

@@ -71,7 +71,8 @@ type TunnelReadyData struct {
 	Status string `json:"status"`
 }
 
-type P2PSignalData struct {
+// RelaySignalData 中继信令数据。
+type RelaySignalData struct {
 	SessionID     string `json:"session_id"`
 	Protocol      string `json:"protocol"`
 	Role          string `json:"role"`
@@ -84,27 +85,32 @@ type P2PSignalData struct {
 	Token         string `json:"token"`
 }
 
-type P2PRelayAuth struct {
-	Type string           `json:"type"`
-	Data P2PRelayAuthData `json:"data"`
+// RelayAuth 中继认证。
+type RelayAuth struct {
+	Type string        `json:"type"`
+	Data RelayAuthData `json:"data"`
 }
 
-type P2PRelayAuthData struct {
+// RelayAuthData 中继认证数据。
+type RelayAuthData struct {
 	SessionID string `json:"session_id"`
 	Token     string `json:"token"`
 	Role      string `json:"role"`
 }
 
-type P2PRelayReady struct {
-	Type string            `json:"type"`
-	Data P2PRelayReadyData `json:"data"`
+// RelayReady 中继就绪消息。
+type RelayReady struct {
+	Type string         `json:"type"`
+	Data RelayReadyData `json:"data"`
 }
 
-type P2PRelayReadyData struct {
+// RelayReadyData 中继就绪数据。
+type RelayReadyData struct {
 	Status string `json:"status"`
 }
 
-type P2PStatusData struct {
+// RelayStatusData 中继状态数据。
+type RelayStatusData struct {
 	SessionID string `json:"session_id"`
 	Status    string `json:"status"`
 	Message   string `json:"message,omitempty"`

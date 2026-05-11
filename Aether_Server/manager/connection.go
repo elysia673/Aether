@@ -123,8 +123,8 @@ func (c *Connection) handleMessage(msg *model.WSMessage) {
 			ch <- &portsData
 			c.manager.UnregisterPendingRequest(portsData.RequestID)
 		}
-	case "p2p_established", "p2p_closed":
-		c.manager.DispatchP2PMessage(c.clientID, msg)
+	case "relay_established", "relay_closed":
+		c.manager.DispatchRelayMessage(c.clientID, msg)
 	case "pong":
 	default:
 		log.Printf("unknown message type: %s", msg.Type)

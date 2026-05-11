@@ -3,6 +3,7 @@ package main
 import (
 	"Aether/common/config"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -11,9 +12,25 @@ import (
 	"time"
 )
 
+var (
+	Version   = "dev"
+	BuildTime = "unknown"
+	GitCommit = "unknown"
+)
+
+func printVersion() {
+	fmt.Printf("Aether Client %s (%s) %s\n", Version, GitCommit, BuildTime)
+}
+
 func main() {
 	configPath := flag.String("config", "client.json", "path to config file")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		printVersion()
+		return
+	}
 
 	cfg, err := config.LoadClient(*configPath)
 	if err != nil {
