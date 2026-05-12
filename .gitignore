@@ -3,3 +3,10 @@ Aether_Server/config.json
 Aether_Server/data/
 build/
 list
+*.sh
+.dockerignore
+Aether_Server/register/register_test.go
+common/config/client_test.go
+Dockerfile
+Dockerfile.client
+.idea/

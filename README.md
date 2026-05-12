@@ -8,9 +8,10 @@
 - **多路复用**: 单连接多通道，减少连接开销
 - **自动重连**: 断线自动重连，隧道自动恢复
 - **心跳检测**: WebSocket ping/pong + TCP keepalive
-- **安全认证**: 魔数协议头 + 令牌认证
+- **安全认证**: mTLS 客户端证书 + JWT Token + API Key 三重认证
 - **配置灵活**: JSON 配置文件 + 环境变量回退
 - **客户端中继**: 支持两个客户端之间通过服务器中继连接
+- **Docker 一键部署**: 自签名/本地证书两种部署脚本
 
 ## 架构
 
@@ -38,7 +39,7 @@
 │                     :9909 (HTTPS/WSS)                        │
 └──────────────────────────┼───────────────────────────────────┘
                            │
-                           │ WebSocket 控制连接
+                           │ WebSocket 控制连接 (mTLS)
                            │
 ┌──────────────────────────┼───────────────────────────────────┐
 │                          │                                   │
@@ -74,6 +75,238 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## 快速开始
+
+### Docker 一键部署（推荐）
+
+#### 自签名证书
+
+```bash
+# 构建镜像 + 生成证书和配置
+./build.sh xxx.xxx.xxx.xxx
+
+# 部署服务端
+./deploy.sh xxx.xxx.xxx.xxx
+```
+
+#### 本地证书
+
+```bash
+# 构建镜像 + 使用已有证书
+./build-cert.sh elysia.media /path/to/cert.pem /path/to/key.pem
+
+# 部署服务端
+./deploy-cert.sh elysia.media /path/to/cert.pem /path/to/key.pem
+```
+
+#### 部署客户端
+
+部署完成后，脚本会输出客户端部署命令，直接复制执行：
+
+```bash
+./deploy-client.sh wss://xxx.xxx.xxx.xxx:9909 "<client-token>" my-device
+```
+
+首次部署需要注册客户端：
+
+```bash
+# 查看公钥
+cat deploy-client/data/client.pub
+
+# 提交注册申请
+aether-cli register apply -id my-device -pubkey deploy-client/data/client.pub -token "<client-token>"
+
+# 审核通过并签发证书
+aether-cli register add -id my-device
+```
+
+### 手动部署
+
+#### 1. 配置服务端
+
+创建 `config.json`：
+
+```json
+{
+  "server": {
+    "addr": ":9909",
+    "domain": "xxx.xxx.xxx.xxx",
+    "tunnel_port": 9908
+  },
+  "tls": {
+    "enabled": true,
+    "cert_file": "ssl/cert.pem",
+    "key_file": "ssl/key.pem"
+  },
+  "auth": {
+    "api_key": "your-api-key",
+    "client_token": "your-client-token"
+  },
+  "storage": "data/proxies.json",
+  "public_ip": ""
+}
+```
+
+#### 2. 启动服务端
+
+```bash
+./aether-server -config config.json
+```
+
+#### 3. CLI 登录
+
+```bash
+aether-cli login -server https://xxx.xxx.xxx.xxx:9909 -api-key "your-api-key"
+```
+
+#### 4. 创建代理
+
+```bash
+# TCP: 将本地 8080 端口映射到服务器 8080 端口
+aether-cli create my-device -remote 8080 -local 8080 -protocol tcp
+
+# UDP: 将本地 53 端口映射到服务器 5353 端口
+aether-cli create my-device -remote 5353 -local 53 -protocol udp
+
+# WebSocket: 将本地 3000 端口映射到服务器 3000 端口
+aether-cli create my-device -remote 3000 -local 3000 -protocol websocket
+```
+
+## 认证流程
+
+```
+                        ┌──────────────┐
+                        │  API Key     │
+                        │ (config.json)│
+                        └──────┬───────┘
+                               │
+                        POST /api/v1/login
+                               │
+                        ┌──────▼───────┐
+                        │   JWT Token  │
+                        │  (1年有效)   │
+                        └──────┬───────┘
+                               │
+                        Authorization: Bearer <token>
+                               │
+                        ┌──────▼───────┐
+                        │  API 接口    │
+                        └──────────────┘
+
+客户端连接:
+                        ┌──────────────┐
+                        │ 客户端证书   │
+                        │ (mTLS, 1年)  │
+                        └──────┬───────┘
+                               │
+                        TLS 握手 + 证书校验
+                               │
+                        ┌──────▼───────┐
+                        │ 注册表校验   │
+                        │ (CN + 状态)  │
+                        └──────┬───────┘
+                               │
+                        WebSocket 连接
+```
+
+## CLI 工具
+
+```bash
+# 登录
+aether-cli login -server https://xxx.xxx.xxx.xxx:9909 -api-key "your-api-key"
+
+# 客户端管理
+aether-cli clients                        # 列出客户端
+aether-cli info my-device                 # 查看代理信息
+
+# 代理管理
+aether-cli proxies                        # 列出所有代理
+aether-cli create my-device -remote 8080 -local 8080 -protocol tcp
+aether-cli close 8080                     # 关闭代理
+
+# 注册管理
+aether-cli register apply -id my-device -pubkey my.pub -token <token>
+aether-cli register add -id my-device
+aether-cli register delete -id my-device -prefix <cert-prefix>
+aether-cli register apply_list            # 待审核列表
+aether-cli register info                  # 已通过列表
+
+# 中继管理
+aether-cli relay client-A client-B -source-port 8090 -target-port 80
+aether-cli relay-sessions                 # 列出中继会话
+aether-cli relay-close <session-id>       # 关闭中继会话
+
+# 其他
+aether-cli ping                           # 健康检查
+aether-cli -json clients                  # JSON 输出模式
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `-config` | `~/.aether_config.json` | 配置文件路径 |
+| `-json` | `false` | JSON 输出模式 |
+| `-version` | `false` | 版本信息 |
+
+## API 接口
+
+| 方法 | 路径 | 认证 | 说明 |
+|------|------|------|------|
+| `GET` | `/PING` | 无 | 健康检查 |
+| `POST` | `/api/v1/login` | API Key | 登录获取 JWT Token |
+| `POST` | `/api/v1/register_apply` | 无 | 提交注册申请 |
+| `GET` | `/api/v1/register_info` | 无 | 查看已通过列表 |
+| `POST` | `/api/v1/register_add` | JWT | 审核通过并签发证书 |
+| `POST` | `/api/v1/register_delete` | JWT | 吊销客户端证书 |
+| `GET` | `/api/v1/register_apply_list` | JWT | 查看待审核列表 |
+| `GET` | `/api/v1/clients` | JWT | 列出所有客户端 |
+| `GET` | `/api/v1/clients/:id/info` | JWT | 获取客户端代理信息 |
+| `POST` | `/api/v1/clients/:id/proxy` | JWT | 创建代理映射 |
+| `GET` | `/api/v1/proxies` | JWT | 列出所有代理 |
+| `DELETE` | `/api/v1/proxies/:port` | JWT | 关闭代理 |
+| `POST` | `/api/v1/relay/connect` | JWT | 创建中继连接 |
+| `GET` | `/api/v1/relay/sessions` | JWT | 列出中继会话 |
+| `DELETE` | `/api/v1/relay/sessions/:id` | JWT | 关闭中继会话 |
+
+## 环境变量
+
+### 服务端
+
+| 变量 | 说明 |
+|------|------|
+| `AETHER_API_KEY` | API 访问密钥 |
+| `AETHER_CLIENT_TOKEN` | 客户端注册令牌 |
+| `AETHER_SERVER_ADDR` | 监听地址 |
+| `AETHER_DOMAIN` | 公网域名 |
+| `AETHER_TUNNEL_PORT` | 隧道端口 |
+| `AETHER_TLS_CERT` | TLS 证书路径 |
+| `AETHER_TLS_KEY` | TLS 私钥路径 |
+| `AETHER_STORAGE` | 存储文件路径 |
+| `AETHER_PUBLIC_IP` | 公网 IP |
+
+### 客户端
+
+| 变量 | 说明 |
+|------|------|
+| `AETHER_WS_URL` | WebSocket 地址 |
+| `AETHER_CLIENT_TOKEN` | 客户端注册令牌 |
+| `AETHER_CLIENT_ID` | 客户端 ID |
+| `AETHER_USE_HTTP` | 使用 HTTP 模式 |
+| `AETHER_TLS_SNI` | TLS SNI 主机名 |
+| `AETHER_ORIGIN` | WebSocket Origin 请求头 |
+| `AETHER_RECONNECT_DELAY` | 重连延迟（秒） |
+
+## 安全机制
+
+| 层级 | 机制 | 说明 |
+|------|------|------|
+| 传输层 | TLS 1.2+ | 所有通信加密 |
+| 客户端认证 | mTLS 客户端证书 | CA 签发，1年有效 |
+| API 认证 | JWT Token | 启动时随机生成密钥，1年有效 |
+| 登录认证 | API Key | 常量时间比较，防时序攻击 |
+| 暴力防护 | Rate Limit | 登录 10次/分钟，API 60次/分钟 |
+| WebSocket | Origin 校验 | 仅允许配置的域名/IP |
+| 证书吊销 | 注册表即时生效 | 删除后立即拒绝连接 |
+
 ## 连接流程
 
 ### 1. 客户端注册
@@ -81,6 +314,9 @@
 ```
 Client                              Server
   │                                    │
+  │──── TLS 握手 (mTLS) ─────────────>│
+  │                                    │── 验证客户端证书
+  │                                    │── 校验注册表 CN + 状态
   │──── WebSocket 连接 ───────────────>│
   │                                    │
   │──── register {client_id, token} ──>│
@@ -104,58 +340,7 @@ User        API Server       Client
   │<── {public_addr} ───────────│
 ```
 
-### 3. TCP 隧道认证
-
-```
-Client                              Server
-  │                                    │
-  │──── TCP 连接 ─────────────────────>│
-  │                                    │
-  │──── [TUNL][len][token] ──────────>│
-  │                                    │── 验证魔数+token
-  │<──── [0x01] (ACK) ────────────────│
-  │                                    │
-  │<════ 多路复用数据传输 ═══════════>│
-```
-
-### 4. 公共连接转发
-
-```
-User                Server              Client          Local Service
-  │                    │                   │                  │
-  │── TCP 连接 ───────>│                   │                  │
-  │                    │── 创建通道 ──────>│                  │
-  │                    │                   │── 连接本地 ─────>│
-  │                    │                   │                  │
-  │<═══════════════════╪═══════════════════╪════════════════>│
-  │                    │    多路复用数据    │                  │
-```
-
-### 5. UDP 代理
-
-```
-User                    Server                  Client              Local Service
-  │                        │                       │                      │
-  │── UDP 包 ─────────────>│                       │                      │
-  │  (首字节='T')          │                       │                      │
-  │                        │                       │                      │
-  │── "TUNNEL\n" ─────────>│                       │                      │
-  │                        │── 注册 UDP 隧道 ─────>│                      │
-  │                        │                       │                      │
-  │── UDP 数据包 ─────────>│                       │                      │
-  │                        │── 转发到隧道 ────────>│── 转发到本地 ───────>│
-  │                        │                       │                      │
-  │<═══════════════════════╪═══════════════════════╪═════════════════════>│
-  │                        │       UDP 数据        │                      │
-```
-
-UDP 隧道建立：
-1. 首个 UDP 包首字节为 `'T'`
-2. 完整标记为 `"TUNNEL\n"` (7字节)
-3. 服务端注册 UDP 隧道
-4. 后续数据包直接转发
-
-### 6. 客户端中继
+### 3. 客户端中继
 
 ```
 User           Server              Client A            Client B
@@ -168,168 +353,7 @@ User           Server              Client A            Client B
   │               │                    │                   │
   │               │<═══════════════════╪═════════════════>│
   │               │      WebSocket 中继连接               │
-  │               │                    │                   │
-  │               │                    │── 本地连接 ──────>│
-  │               │                    │   (通过中继)      │
 ```
-
-## 快速开始
-
-### 1. 配置服务端
-
-创建 `Aether_Server/config.json`（可参考 `Aether_Server/config.example.json`）:
-
-```json
-{
-  "server": {
-    "addr": ":9909",
-    "domain": "your-domain.com",
-    "tunnel_port": 9908
-  },
-  "tls": {
-    "enabled": true,
-    "cert_file": "ssl/cert.pem",
-    "key_file": "ssl/key.pem"
-  },
-  "auth": {
-    "api_key": "your-api-key",
-    "client_token": "your-client-token"
-  },
-  "storage": "data/proxies.json",
-  "public_ip": ""
-}
-```
-
-### 2. 启动服务端
-
-```bash
-cd Aether_Server
-go run main.go -config config.json
-```
-
-### 3. 启动客户端
-
-```bash
-cd Aether_Client
-export AETHER_WS_URL="wss://your-domain.com:9909/ws"
-export AETHER_CLIENT_TOKEN="your-client-token"
-go run main.go -id my-device
-```
-
-### 4. 创建代理
-
-```bash
-# TCP: 将本地 8080 端口映射到服务器 8080 端口
-curl -X POST https://your-domain.com:9909/api/v1/clients/my-device/proxy \
-  -H "X-API-KEY: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "remote_port": 8080,
-    "local_port": 8080,
-    "protocol": "tcp",
-    "bind_addr": "0.0.0.0"
-  }'
-
-# UDP: 将本地 53 端口映射到服务器 5353 端口
-curl -X POST https://your-domain.com:9909/api/v1/clients/my-device/proxy \
-  -H "X-API-KEY: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "remote_port": 5353,
-    "local_port": 53,
-    "protocol": "udp",
-    "bind_addr": "0.0.0.0"
-  }'
-
-# WebSocket: 将本地 3000 端口映射到服务器 3000 端口
-curl -X POST https://your-domain.com:9909/api/v1/clients/my-device/proxy \
-  -H "X-API-KEY: your-api-key" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "remote_port": 3000,
-    "local_port": 3000,
-    "protocol": "websocket",
-    "bind_addr": "0.0.0.0"
-  }'
-```
-
-## 命令行参数
-
-### 服务端
-
-```bash
-./aether-server -config config.json
-```
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `-config` | `config.json` | 配置文件路径 |
-
-### 客户端
-
-```bash
-./aether-client -config client.json
-```
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `-config` | `client.json` | 配置文件路径 |
-
-### CLI 工具
-
-```bash
-# 配置文件 (~/.aether_config.json)
-{
-  "server": "https://your-domain.com:9909",
-  "api_key": "your-api-key",
-  "insecure": false
-}
-
-# 使用示例
-aether-cli ping                           # 健康检查
-aether-cli clients                        # 列出客户端
-aether-cli info my-device                 # 查看代理信息
-aether-cli proxies                        # 列出所有代理
-aether-cli create my-device -remote 8080 -local 8080 -protocol tcp
-aether-cli close 8080                     # 关闭代理
-aether-cli relay client-A client-B -source-port 8090 -target-port 80  # 创建中继
-aether-cli relay-sessions                 # 列出中继会话
-aether-cli relay-close <session-id>       # 关闭中继会话
-
-# JSON 输出模式
-aether-cli -json clients
-aether-cli -json info my-device
-```
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `-config` | `~/.aether_config.json` | 配置文件路径 |
-| `-json` | `false` | JSON 输出模式 |
-
-## 环境变量
-
-| 变量 | 说明 |
-|------|------|
-| `AETHER_API_KEY` | API 访问密钥（配置文件优先） |
-| `AETHER_CLIENT_TOKEN` | 客户端注册令牌（配置文件优先） |
-| `AETHER_PUBLIC_IP` | 服务器公网 IP（配置文件优先） |
-| `AETHER_WS_URL` | 客户端 WebSocket 地址 |
-| `AETHER_TLS_SNI` | 客户端 TLS SNI 主机名（从 AETHER_WS_URL 解析） |
-| `AETHER_ORIGIN` | 客户端 WebSocket Origin 请求头（优先于自动生成） |
-
-## API 接口
-
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `GET` | `/PING` | 健康检查 |
-| `GET` | `/api/v1/clients` | 列出所有客户端 |
-| `GET` | `/api/v1/clients/:id/info` | 获取客户端代理信息 |
-| `POST` | `/api/v1/clients/:id/proxy` | 创建代理映射 |
-| `GET` | `/api/v1/proxies` | 列出所有代理 |
-| `DELETE` | `/api/v1/proxies/:port` | 关闭代理 |
-| `POST` | `/api/v1/relay/connect` | 创建中继连接 |
-| `GET` | `/api/v1/relay/sessions` | 列出中继会话 |
-| `DELETE` | `/api/v1/relay/sessions/:id` | 关闭中继会话 |
 
 ## 协议说明
 
@@ -343,16 +367,6 @@ aether-cli -json info my-device
 └──────────┴──────────┴──────────────────┘
 ```
 
-### UDP 隧道协议
-
-```
-┌──────────┬──────────────────┐
-│  Marker  │     Data         │
-│  7 bytes │   N bytes        │
-│"TUNNEL\n"│  后续数据包      │
-└──────────┴──────────────────┘
-```
-
 ### 多路复用帧协议
 
 ```
@@ -363,24 +377,12 @@ aether-cli -json info my-device
 └──────────┴──────────┴──────────────────┘
 ```
 
-控制帧 (ChanID=0):
-
-```
-┌──────────┬──────────┬──────────────────┐
-│ Command  │  ChanID  │                  │
-│  1 byte  │  2 bytes │                  │
-│  0x01=开  │  通道ID  │                  │
-│  0x02=关  │          │                  │
-└──────────┴──────────┴──────────────────┘
-```
-
 ## 项目结构
 
 ```
 Aether/
 ├── Aether_Server/              # 服务端
 │   ├── main.go                 # 入口
-│   ├── config.example.json     # 配置示例
 │   ├── handler/                # 请求处理器
 │   │   ├── api.go              # REST API
 │   │   ├── ws.go               # WebSocket 注册
@@ -389,32 +391,28 @@ Aether/
 │   │   ├── udp_proxy.go        # UDP 代理
 │   │   └── relay.go            # 客户端中继
 │   ├── manager/                # 连接管理
-│   │   ├── client_manager.go
-│   │   ├── client_table.go
-│   │   └── connection.go
-│   ├── middleware/              # 中间件
+│   ├── middleware/              # 中间件 (JWT, Auth, RateLimit)
+│   ├── register/               # CA 证书管理
 │   └── storage/                # 持久化存储
 ├── Aether_Client/              # 客户端
 │   ├── main.go                 # 入口
 │   ├── client.go               # 客户端核心
 │   ├── conn/                   # WebSocket 连接
-│   ├── handler/                # 消息处理
-│   │   ├── handler.go          # 消息分发
-│   │   └── relay.go            # 中继处理
-│   ├── ports.go                # 端口扫描
-│   └── utils.go                # 工具函数
+│   └── handler/                # 消息处理
 ├── Aether_Cmd/                 # 命令行工具
 │   └── aether-cli/             # CLI 管理工具
-│       ├── main.go             # 入口
-│       └── config.example.json
 ├── common/                     # 共享代码
 │   ├── config/                 # 配置管理
 │   ├── model/                  # 数据模型
 │   ├── mux/                    # 多路复用
-│   ├── proto/                  # 协议定义
-│   ├── wsconn/                 # WebSocket 适配
-│   └── relay/                  # 中继打洞
-└── build/                      # 构建产物
+│   └── wsconn/                 # WebSocket 适配
+├── Dockerfile                  # 服务端 Docker 镜像
+├── Dockerfile.client           # 客户端 Docker 镜像
+├── deploy.sh                   # 部署脚本 (自签名证书)
+├── deploy-cert.sh              # 部署脚本 (本地证书)
+├── deploy-client.sh            # 客户端部署脚本
+├── build.sh                    # 构建脚本 (自签名证书)
+└── build-cert.sh               # 构建脚本 (本地证书)
 ```
 
 ## License

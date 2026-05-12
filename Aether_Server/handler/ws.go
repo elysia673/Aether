@@ -3,7 +3,6 @@ package handler
 import (
 	"Aether/Aether_Server/manager"
 	"Aether/Aether_Server/register"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -24,8 +23,10 @@ func newUpgrader(domain string) *websocket.Upgrader {
 			if domain == "" {
 				return true
 			}
-			allowed := fmt.Sprintf("https://%s", domain)
-			if strings.HasPrefix(origin, allowed) {
+			if strings.HasPrefix(origin, "https://"+domain) {
+				return true
+			}
+			if strings.HasPrefix(origin, "http://"+domain) {
 				return true
 			}
 			log.Printf("WebSocket 连接被拒绝: origin=%s", origin)
