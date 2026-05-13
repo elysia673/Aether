@@ -31,6 +31,7 @@ type MessageSender interface {
 type Config struct {
 	ClientID       string
 	UseHTTP        bool
+	Insecure       bool
 	SNIOverride    string
 	OriginOverride string
 }
@@ -495,7 +496,8 @@ func (h *Handler) connectTunnelWS(tunnelURL string, token string) (net.Conn, err
 
 	if !h.cfg.UseHTTP {
 		dialer.TLSClientConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: h.cfg.Insecure,
 		}
 		sni := h.sniForURL(tunnelURL)
 		if sni != "" {

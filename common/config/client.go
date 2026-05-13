@@ -15,6 +15,7 @@ type ClientConfig struct {
 	PublicKeyPath         string `json:"public_key_path"`
 	CertificatePath       string `json:"certificate_path"`
 	UseHTTP               bool   `json:"use_http"`
+	Insecure              bool   `json:"insecure"`
 	TLSSNI                string `json:"tls_sni"`
 	Origin                string `json:"origin"`
 	ReconnectDelaySeconds int    `json:"reconnect_delay_seconds"`
@@ -43,6 +44,7 @@ func LoadClient(path string) (*ClientConfig, error) {
 	cfg.ClientToken = envStr("AETHER_CLIENT_TOKEN", cfg.ClientToken)
 	cfg.ClientID = envStr("AETHER_CLIENT_ID", cfg.ClientID)
 	cfg.UseHTTP = envBool("AETHER_USE_HTTP", cfg.UseHTTP)
+	cfg.Insecure = envBool("AETHER_INSECURE", cfg.Insecure)
 	cfg.TLSSNI = envStr("AETHER_TLS_SNI", cfg.TLSSNI)
 	cfg.Origin = envStr("AETHER_ORIGIN", cfg.Origin)
 	cfg.ReconnectDelaySeconds = envInt("AETHER_RECONNECT_DELAY", cfg.ReconnectDelaySeconds)

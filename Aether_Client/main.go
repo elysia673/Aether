@@ -41,7 +41,7 @@ func main() {
 		cfg.ServerURL = strings.Replace(cfg.ServerURL, "wss://", "ws://", 1)
 	}
 
-	client := NewClient(cfg.ServerURL, cfg.ClientID, cfg.ClientToken, cfg.PrivateKeyPath, cfg.PublicKeyPath, cfg.CertificatePath, cfg.UseHTTP, cfg.TLSSNI, cfg.Origin, time.Duration(cfg.ReconnectDelaySeconds)*time.Second)
+	client := NewClient(cfg.ServerURL, cfg.ClientID, cfg.ClientToken, cfg.PrivateKeyPath, cfg.PublicKeyPath, cfg.CertificatePath, cfg.UseHTTP, cfg.Insecure, cfg.TLSSNI, cfg.Origin, time.Duration(cfg.ReconnectDelaySeconds)*time.Second)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

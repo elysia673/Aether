@@ -286,7 +286,7 @@ func (rm *relayManager) connectRelay(relayURL string) (net.Conn, error) {
 	}
 
 	if !rm.cfg.UseHTTP {
-		dialer.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		dialer.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: rm.cfg.Insecure}
 		if rm.cfg.SNIOverride != "" {
 			dialer.TLSClientConfig.ServerName = rm.cfg.SNIOverride
 		} else if hostname != "" {

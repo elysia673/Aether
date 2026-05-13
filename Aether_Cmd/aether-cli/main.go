@@ -47,6 +47,7 @@ var (
 	configPath  string
 	jsonOutput  bool
 	showVersion bool
+	insecure    bool
 	cfg         *CLIConfig
 	httpClient  *http.Client
 )
@@ -62,6 +63,7 @@ func init() {
 	flag.StringVar(&configPath, "config", defaultConfig, "配置文件路径")
 	flag.BoolVar(&jsonOutput, "json", false, "JSON 输出模式")
 	flag.BoolVar(&showVersion, "version", false, "打印版本")
+	flag.BoolVar(&insecure, "insecure", false, "跳过 TLS 验证（自签名证书）")
 
 	// 自定义帮助信息
 	flag.Usage = printUsage
@@ -99,7 +101,7 @@ func main() {
 		},
 	}
 	transport := &http.Transport{
-		TLSClientConfig:       &tls.Config{InsecureSkipVerify: cfg.Insecure},
+		TLSClientConfig:       &tls.Config{InsecureSkipVerify: cfg.Insecure || insecure},
 		DialContext:           dialer.DialContext,
 		MaxIdleConns:          10,
 		IdleConnTimeout:       90 * time.Second,
@@ -255,16 +257,15 @@ func getHomeDir() string {
 func loadConfig(path string) (*CLIConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return &CLIConfig{}, nil
+		}
 		return nil, fmt.Errorf("读取配置文件: %w", err)
 	}
 
 	var cfg CLIConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("解析配置文件: %w", err)
-	}
-
-	if cfg.Server == "" {
-		return nil, fmt.Errorf("server 地址不能为空")
 	}
 
 	// 确保 server 地址格式正确
@@ -780,7 +781,7 @@ func cmdLogin(args ...string) {
 	}
 	bodyData, _ := json.Marshal(body)
 
-	resp, err := http.Post(url, "application/json", bytes.NewReader(bodyData))
+	resp, err := httpClient.Post(url, "application/json", bytes.NewReader(bodyData))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "请求失败: %v\n", err)
 		os.Exit(1)
@@ -813,6 +814,7 @@ func cmdLogin(args ...string) {
 	cfg.Server = *serverURL
 	cfg.Token = result.Data.Token
 	cfg.TokenExp = time.Now().Unix() + result.Data.ExpiresIn
+	cfg.Insecure = cfg.Insecure || insecure
 
 	configData, _ := json.MarshalIndent(cfg, "", "  ")
 	os.WriteFile(configPath, configData, 0600)

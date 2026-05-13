@@ -83,10 +83,28 @@
 
 ```bash
 # 构建镜像 + 生成证书和配置
-./build.sh xxx.xxx.xxx.xxx
+./docker/build.sh xxx.xxx.xxx.xxx
 
 # 部署服务端
-./deploy.sh xxx.xxx.xxx.xxx
+./docker/deploy.sh xxx.xxx.xxx.xxx
+```
+
+#### 本地证书
+
+```bash
+# 构建镜像 + 使用已有证书
+./docker/build-cert.sh xxx.xxx.xxx.xxx /path/to/cert.pem /path/to/key.pem
+
+# 部署服务端
+./docker/deploy-cert.sh xxx.xxx.xxx.xxx /path/to/cert.pem /path/to/key.pem
+```
+
+#### 部署客户端
+
+部署完成后，脚本会输出客户端部署命令，直接复制执行：
+
+```bash
+./docker/deploy-client.sh wss://xxx.xxx.xxx.xxx:9909 "<client-token>" my-device
 ```
 
 #### 本地证书
@@ -351,8 +369,8 @@ User           Server              Client A            Client B
   │               │── relay signal ───>│                   │
   │               │── relay signal ───────────────────────>│
   │               │                    │                   │
-  │               │<═══════════════════╪═════════════════>│
-  │               │      WebSocket 中继连接               │
+  │               │<═══════════════════╪══════════════════>│
+  │               │      WebSocket 中继连接                 │
 ```
 
 ## 协议说明
@@ -363,7 +381,7 @@ User           Server              Client A            Client B
 ┌──────────┬──────────┬──────────────────┐
 │  Magic   │  Length  │      Token       │
 │  4 bytes │  2 bytes │   N bytes        │
-│  "TUNL"  │  N       │  认证令牌        │
+│  "TUNL"  │  N       │  认证令牌         │
 └──────────┴──────────┴──────────────────┘
 ```
 
@@ -391,7 +409,7 @@ Aether/
 │   │   ├── udp_proxy.go        # UDP 代理
 │   │   └── relay.go            # 客户端中继
 │   ├── manager/                # 连接管理
-│   ├── middleware/              # 中间件 (JWT, Auth, RateLimit)
+│   ├── middleware/             # 中间件 (JWT, Auth, RateLimit)
 │   ├── register/               # CA 证书管理
 │   └── storage/                # 持久化存储
 ├── Aether_Client/              # 客户端
@@ -406,13 +424,15 @@ Aether/
 │   ├── model/                  # 数据模型
 │   ├── mux/                    # 多路复用
 │   └── wsconn/                 # WebSocket 适配
-├── Dockerfile                  # 服务端 Docker 镜像
-├── Dockerfile.client           # 客户端 Docker 镜像
-├── deploy.sh                   # 部署脚本 (自签名证书)
-├── deploy-cert.sh              # 部署脚本 (本地证书)
-├── deploy-client.sh            # 客户端部署脚本
-├── build.sh                    # 构建脚本 (自签名证书)
-└── build-cert.sh               # 构建脚本 (本地证书)
+└── docker/                     # Docker 构建与部署
+    ├── Dockerfile              # 服务端镜像
+    ├── Dockerfile.client       # 客户端镜像
+    ├── build.sh                # 构建脚本 (自签名证书)
+    ├── build-cert.sh           # 构建脚本 (本地证书)
+    ├── build2.sh               # 多平台构建脚本
+    ├── deploy.sh               # 部署脚本 (自签名证书)
+    ├── deploy-cert.sh          # 部署脚本 (本地证书)
+    └── deploy-client.sh        # 客户端部署脚本
 ```
 
 ## License

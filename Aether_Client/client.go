@@ -32,6 +32,7 @@ type Client struct {
 	publicKeyPath  string
 	certPath       string
 	useHTTP        bool
+	insecure       bool
 	tlsSNI         string
 	origin         string
 	reconnectDelay time.Duration
@@ -39,7 +40,7 @@ type Client struct {
 }
 
 // NewClient 创建新的客户端实例。
-func NewClient(url, id, token, privateKeyPath, publicKeyPath, certPath string, useHTTP bool, tlsSNI, origin string, reconnectDelay time.Duration) *Client {
+func NewClient(url, id, token, privateKeyPath, publicKeyPath, certPath string, useHTTP, insecure bool, tlsSNI, origin string, reconnectDelay time.Duration) *Client {
 	return &Client{
 		url:            url,
 		id:             id,
@@ -48,6 +49,7 @@ func NewClient(url, id, token, privateKeyPath, publicKeyPath, certPath string, u
 		publicKeyPath:  publicKeyPath,
 		certPath:       certPath,
 		useHTTP:        useHTTP,
+		insecure:       insecure,
 		tlsSNI:         tlsSNI,
 		origin:         origin,
 		reconnectDelay: reconnectDelay,
@@ -73,7 +75,7 @@ func (c *Client) Run() {
 		log.Println("密钥对已生成")
 		
 		// 先检查是否已签发证书
-		status, certPEM, err := checkApprovalStatus(c.url, c.id, c.token)
+		status, certPEM, err := checkApprovalStatus(c.url, c.id, c.token, c.insecure)
 		if err == nil && status == "approved" && certPEM != "" {
 			// 证书已签发，直接保存
 			if err := os.WriteFile(c.certPath, []byte(certPEM), 0600); err != nil {
@@ -82,7 +84,7 @@ func (c *Client) Run() {
 			log.Println("证书已存在，直接下载...")
 		} else {
 			// 提交注册申请
-			if err := submitRegistration(c.url, c.id, c.token, c.publicKeyPath); err != nil {
+			if err := submitRegistration(c.url, c.id, c.token, c.publicKeyPath, c.insecure); err != nil {
 				// 如果返回 "already exists"，说明已提交申请，等待审核
 				if strings.Contains(err.Error(), "already exists") {
 					log.Println("注册申请已存在，等待管理员审核...")
@@ -94,7 +96,7 @@ func (c *Client) Run() {
 			}
 			
 			// 阻塞等待证书签发
-			if err := waitForApprovalAndDownloadCert(c.url, c.id, c.token, c.certPath, c.stopCh); err != nil {
+			if err := waitForApprovalAndDownloadCert(c.url, c.id, c.token, c.certPath, c.insecure, c.stopCh); err != nil {
 				log.Fatalf("等待审核失败: %v", err)
 			}
 		}
@@ -121,9 +123,9 @@ func (c *Client) Run() {
 }
 
 // waitForApprovalAndDownloadCert 等待审核通过并下载证书
-func waitForApprovalAndDownloadCert(serverURL, clientID, token, certPath string, stopCh <-chan struct{}) error {
+func waitForApprovalAndDownloadCert(serverURL, clientID, token, certPath string, insecure bool, stopCh <-chan struct{}) error {
 	// 立即检查一次
-	status, certPEM, err := checkApprovalStatus(serverURL, clientID, token)
+	status, certPEM, err := checkApprovalStatus(serverURL, clientID, token, insecure)
 	if err == nil && status == "approved" && certPEM != "" {
 		if err := os.WriteFile(certPath, []byte(certPEM), 0600); err != nil {
 			return fmt.Errorf("save certificate: %w", err)
@@ -140,7 +142,7 @@ func waitForApprovalAndDownloadCert(serverURL, clientID, token, certPath string,
 			return fmt.Errorf("收到退出信号")
 		case <-ticker.C:
 			// 查询审核状态
-			status, certPEM, err := checkApprovalStatus(serverURL, clientID, token)
+			status, certPEM, err := checkApprovalStatus(serverURL, clientID, token, insecure)
 			if err != nil {
 				log.Printf("查询状态失败: %v，继续等待...", err)
 				continue
@@ -160,7 +162,7 @@ func waitForApprovalAndDownloadCert(serverURL, clientID, token, certPath string,
 }
 
 // checkApprovalStatus 查询审核状态
-func checkApprovalStatus(serverURL, clientID, token string) (string, string, error) {
+func checkApprovalStatus(serverURL, clientID, token string, insecure bool) (string, string, error) {
 	// 转换 WebSocket URL 为 HTTP URL
 	apiURL := serverURL
 	if len(apiURL) > 6 && apiURL[:6] == "wss://" {
@@ -182,7 +184,12 @@ func checkApprovalStatus(serverURL, clientID, token string) (string, string, err
 		return "", "", fmt.Errorf("create request: %w", err)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure},
+		},
+		Timeout: 10 * time.Second,
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", "", fmt.Errorf("http request: %w", err)
@@ -244,7 +251,7 @@ func (c *Client) connectAndServe() error {
 		dialer.TLSClientConfig = &tls.Config{
 			Certificates:       []tls.Certificate{cert},
 			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: true,
+			InsecureSkipVerify: c.insecure,
 		}
 
 		if sni := tlsServerName(c.url, c.tlsSNI); sni != "" {
@@ -273,6 +280,7 @@ func (c *Client) connectAndServe() error {
 	h := handler.New(handler.Config{
 		ClientID:       c.id,
 		UseHTTP:        c.useHTTP,
+		Insecure:       c.insecure,
 		SNIOverride:    tlsServerName(c.url, c.tlsSNI),
 		OriginOverride: originHeader(c.url, c.useHTTP, c.origin),
 	})
@@ -360,7 +368,7 @@ func generateKeyPair(privateKeyPath, publicKeyPath string) error {
 }
 
 // submitRegistration 提交注册申请
-func submitRegistration(serverURL, clientID, token, publicKeyPath string) error {
+func submitRegistration(serverURL, clientID, token, publicKeyPath string, insecure bool) error {
 	// 读取公钥
 	pubKeyData, err := os.ReadFile(publicKeyPath)
 	if err != nil {
@@ -390,7 +398,13 @@ func submitRegistration(serverURL, clientID, token, publicKeyPath string) error 
 		apiURL = apiURL + "/api/v1/register_apply"
 	}
 
-	resp, err := http.Post(apiURL, "application/json", bytes.NewReader(bodyData))
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: insecure},
+		},
+		Timeout: 10 * time.Second,
+	}
+	resp, err := client.Post(apiURL, "application/json", bytes.NewReader(bodyData))
 	if err != nil {
 		return fmt.Errorf("http request: %w", err)
 	}

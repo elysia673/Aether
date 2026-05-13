@@ -4,6 +4,7 @@
   "client_token": "your-client-token",
   "client_id": "raspberry-pi-01",
   "use_http": false,
+  "insecure": false,
   "tls_sni": "",
   "origin": "",
   "reconnect_delay_seconds": 5
@@ -15,6 +16,7 @@
   "client_token": "your-client-token",
   "client_id": "test-device-01",
   "use_http": true,
+  "insecure": false,
   "tls_sni": "",
   "origin": "",
   "reconnect_delay_seconds": 3
