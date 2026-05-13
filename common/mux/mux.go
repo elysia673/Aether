@@ -67,10 +67,13 @@ func New(conn net.Conn) *Multiplexer {
 		closeChan:  make(chan struct{}),
 	}
 
-	// 启用 TCP keepalive
+	// TCP 优化
 	if tcpConn, ok := conn.(*net.TCPConn); ok {
 		tcpConn.SetKeepAlive(true)
 		tcpConn.SetKeepAlivePeriod(30 * time.Second)
+		tcpConn.SetNoDelay(true)
+		tcpConn.SetReadBuffer(256 * 1024)
+		tcpConn.SetWriteBuffer(256 * 1024)
 	}
 
 	go m.readLoop()
@@ -358,7 +361,7 @@ func (m *Multiplexer) HandleChannel(ch *Channel) {
 			}
 			wg.Done()
 		}()
-		buf := make([]byte, 4096)
+		buf := make([]byte, MaxFrameSize)
 		for {
 			n, err := localConn.Read(buf)
 			if err != nil {

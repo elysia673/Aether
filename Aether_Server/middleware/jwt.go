@@ -15,17 +15,32 @@ import (
 )
 
 var (
-	jwtSecret   []byte
-	registerDir = "./data/registered_keys"
+	jwtSecret     []byte
+	jwtSecretFile = "./data/jwt_secret"
+	registerDir   = "./data/registered_keys"
 )
 
 func InitJWTSecret() {
+	// 尝试从文件加载
+	data, err := os.ReadFile(jwtSecretFile)
+	if err == nil && len(data) >= 32 {
+		jwtSecret = data[:32]
+		log.Println("JWT 密钥已从文件加载")
+		return
+	}
+
+	// 生成新密钥并保存
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		log.Fatalf("生成 JWT 密钥失败: %v", err)
 	}
 	jwtSecret = b
-	log.Println("JWT 密钥已随机生成（重启后旧 token 失效）")
+
+	os.MkdirAll(filepath.Dir(jwtSecretFile), 0755)
+	if err := os.WriteFile(jwtSecretFile, b, 0600); err != nil {
+		log.Printf("保存 JWT 密钥失败: %v", err)
+	}
+	log.Println("JWT 密钥已随机生成并保存")
 }
 
 type Claims struct {

@@ -56,9 +56,16 @@ func (r *Registry) AddApplication(clientID, publicKey string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// 检查是否已存在
-	if _, exists := r.clients[clientID]; exists {
-		return fmt.Errorf("client %s already exists", clientID)
+	// 如果已存在
+	if existing, exists := r.clients[clientID]; exists {
+		if existing.Status == "approved" {
+			return fmt.Errorf("client %s already approved", clientID)
+		}
+		// pending 状态直接覆盖
+		existing.PublicKey = publicKey
+		existing.CreatedAt = time.Now().Unix()
+		r.save()
+		return nil
 	}
 
 	r.clients[clientID] = &ClientRecord{
