@@ -110,6 +110,8 @@ func (h *Handler) Handle(msg *model.WSMessage) {
 		h.handleProxyClosed(msg.Data)
 	case "tunnel_request":
 		h.handleTunnelRequest(msg.Data)
+	case "ping":
+		h.handlePing(msg.Data)
 	case "relay_signal":
 		if h.relay != nil {
 			h.relay.handleRelaySignal(msg.Data)
@@ -446,77 +448,7 @@ func pipeTCP(a, b net.Conn) {
 	wg.Wait()
 }
 
-func (h *Handler) runTunnel(ctx context.Context, serverHost string, remotePort int, token string, localPort int, localIP string, tunnelPort int) {
-	alog.Info(alog.CatTunnel, "Starting tunnel with multiplexing",
-		"remote", fmt.Sprintf("%s:%d", serverHost, remotePort),
-		"local", fmt.Sprintf("%s:%d", localIP, localPort),
-		"tunnelPort", tunnelPort)
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		connectPort := remotePort
-		if tunnelPort > 0 {
-			connectPort = tunnelPort
-		}
-
-		tunnelAddr := net.JoinHostPort(serverHost, fmt.Sprintf("%d", connectPort))
-		alog.Info(alog.CatTunnel, "Connecting tunnel", "addr", tunnelAddr)
-
-		startDial := time.Now()
-		conn, err := net.DialTimeout("tcp", tunnelAddr, 10*time.Second)
-		dialElapsed := time.Since(startDial)
-		if err != nil {
-			alog.Error(alog.CatTunnel, "Tunnel dial failed", "elapsed", dialElapsed, "error", err)
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		alog.Info(alog.CatTunnel, "Connected to tunnel",
-			"local", conn.LocalAddr(), "remote", conn.RemoteAddr(), "dialElapsed", dialElapsed)
-
-		start := time.Now()
-		if err := proto.WriteTunnelAuth(conn, token); err != nil {
-			alog.Error(alog.CatTunnel, "Failed to send tunnel auth", "error", err)
-			conn.Close()
-			time.Sleep(1 * time.Second)
-			continue
-		}
-		alog.Info(alog.CatTunnel, "Tunnel auth sent, waiting for acknowledgement", "elapsed", time.Since(start))
-
-		ack := make([]byte, 1)
-		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-		ackN, err := io.ReadFull(conn, ack)
-		conn.SetReadDeadline(time.Time{})
-		if err != nil {
-			alog.Error(alog.CatTunnel, "Acknowledgement read failed", "error", err, "bytesRead", ackN)
-			conn.Close()
-			time.Sleep(1 * time.Second)
-			continue
-		}
-		if ack[0] != 0x01 {
-			alog.Error(alog.CatTunnel, "Invalid acknowledgement byte", "byte", fmt.Sprintf("0x%02x", ack[0]))
-			conn.Close()
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		alog.Info(alog.CatTunnel, "Tunnel authenticated, creating multiplexer", "ack", fmt.Sprintf("0x%02x", ack[0]))
-
-		mx := mux.New(conn)
-		mx.LocalTarget = net.JoinHostPort(localIP, fmt.Sprintf("%d", localPort))
-		mx.OnNewChannel = mx.HandleChannel
-
-		<-mx.Done()
-		alog.Info(alog.CatTunnel, "Multiplexer closed, reconnecting")
-
-		time.Sleep(1 * time.Second)
-	}
-}
 
 // runTunnelUDP 运行 UDP 隧道
 // 通过 TCP 连接到服务器的 UDP 隧道端口，然后转发 UDP 数据
@@ -860,4 +792,14 @@ func unmarshalData[T any](data interface{}) (*T, error) {
 		}
 		return &result, nil
 	}
+}
+
+func (h *Handler) handlePing(data interface{}) {
+	if h.sender == nil {
+		return
+	}
+	h.sender.WriteJSON(&model.WSMessage{
+		Type: "pong",
+		Data: data,
+	})
 }

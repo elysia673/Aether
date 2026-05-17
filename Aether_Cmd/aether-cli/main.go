@@ -486,6 +486,8 @@ func cmdListClients() {
 			ConnectedAt int64  `json:"connected_at"`
 			ProxyCount  int    `json:"proxy_count"`
 			Host        string `json:"host"`
+			Latency     string `json:"latency"`
+			Online      bool   `json:"online"`
 		} `json:"clients"`
 	}
 	json.Unmarshal(resp.Data, &data)
@@ -496,10 +498,15 @@ func cmdListClients() {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "ID\t地址\t代理数\t主机\n")
-	fmt.Fprintf(w, "--\t----\t------\t----\n")
+	fmt.Fprintf(w, "ID\t地址\t状态\t延迟\t代理数\t主机\n")
+	fmt.Fprintf(w, "--\t----\t----\t----\t------\t----\n")
 	for _, c := range data.Clients {
-		fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", c.ID, c.RemoteAddr, c.ProxyCount, c.Host)
+		status := "离线"
+		if c.Online {
+			status = "在线"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\n",
+			c.ID, c.RemoteAddr, status, c.Latency, c.ProxyCount, c.Host)
 	}
 	w.Flush()
 }

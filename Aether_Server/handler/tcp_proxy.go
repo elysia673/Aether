@@ -94,7 +94,6 @@ func (h *APIHandler) StartTCPProxy(port int, bindAddr string, table *manager.Cli
 		})
 	}
 
-	table.SetPending(key)
 	alog.Info(alog.CatProxy, "TCP proxy listening", "port", port, "client_id", table.ClientID())
 
 	for {

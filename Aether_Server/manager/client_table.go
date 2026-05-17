@@ -32,7 +32,6 @@ type ClientTable struct {
 	proxyMu sync.RWMutex
 
 	multiplexers map[string]*mux.Multiplexer
-	pending      map[string]bool
 	wsTokens     map[string]string
 	tunnelTokens map[string]string // token -> key (用于隧道端口认证)
 	tunnelMu     sync.RWMutex
@@ -51,7 +50,6 @@ func NewClientTable(clientID string, conn *Connection, remoteAddr string, connec
 		host:         host,
 		proxies:      make(map[int]*ProxyInfo),
 		multiplexers: make(map[string]*mux.Multiplexer),
-		pending:      make(map[string]bool),
 		wsTokens:     make(map[string]string),
 		tunnelTokens: make(map[string]string),
 		udpTunnels:   make(map[string]net.Conn),
@@ -133,18 +131,6 @@ func (t *ClientTable) ProxyCount() int {
 
 // TCP 隧道操作
 
-func (t *ClientTable) SetPending(key string) {
-	t.tunnelMu.Lock()
-	t.pending[key] = true
-	t.tunnelMu.Unlock()
-}
-
-func (t *ClientTable) IsPending(key string) bool {
-	t.tunnelMu.RLock()
-	defer t.tunnelMu.RUnlock()
-	return t.pending[key]
-}
-
 func (t *ClientTable) PutMultiplexer(key string, mx *mux.Multiplexer) {
 	t.tunnelMu.Lock()
 	old := t.multiplexers[key]
@@ -173,7 +159,6 @@ func (t *ClientTable) RemoveTunnel(key string) {
 	if m != nil {
 		delete(t.multiplexers, key)
 	}
-	delete(t.pending, key)
 	t.tunnelMu.Unlock()
 	alog.Info(alog.CatMux, "removeTunnel unlock done", "key", key, "total", time.Since(t0))
 
@@ -222,22 +207,6 @@ func (t *ClientTable) StoreTunnelToken(token, key string) {
 	t.tunnelMu.Unlock()
 }
 
-func (t *ClientTable) GetTunnelToken(token string) (string, error) {
-	t.tunnelMu.RLock()
-	defer t.tunnelMu.RUnlock()
-	key, ok := t.tunnelTokens[token]
-	if !ok {
-		return "", fmt.Errorf("invalid token")
-	}
-	return key, nil
-}
-
-func (t *ClientTable) RemoveTunnelToken(token string) {
-	t.tunnelMu.Lock()
-	delete(t.tunnelTokens, token)
-	t.tunnelMu.Unlock()
-}
-
 // RemoveTunnelTokenByKey 根据代理 key 删除隧道 token
 func (t *ClientTable) RemoveTunnelTokenByKey(key string) {
 	t.tunnelMu.Lock()
@@ -283,7 +252,6 @@ func (t *ClientTable) Cleanup() {
 		muxes = append(muxes, mx)
 	}
 	t.multiplexers = make(map[string]*mux.Multiplexer)
-	t.pending = make(map[string]bool)
 	t.tunnelMu.Unlock()
 
 	for _, mx := range muxes {

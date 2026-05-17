@@ -38,6 +38,8 @@ type Connection struct {
 	mu          sync.RWMutex
 	closeOnce   sync.Once
 	connectedAt time.Time
+	lastPingAt  time.Time
+	latency     time.Duration
 }
 
 // NewConnection 创建新的 WebSocket 连接封装
@@ -48,6 +50,7 @@ func NewConnection(wsConn *websocket.Conn, mgr *ClientManager) *Connection {
 		send:        make(chan []byte, 256),
 		done:        make(chan struct{}),
 		connectedAt: time.Now(),
+		lastPingAt:  time.Now(),
 	}
 }
 
@@ -134,6 +137,7 @@ func (c *Connection) handleMessage(msg *model.WSMessage) {
 			}
 		}
 	case "pong":
+		c.handlePong(msg.Data)
 	default:
 		alog.Warn(alog.CatMux, "未知消息类型", "type", msg.Type)
 	}
@@ -362,4 +366,33 @@ func (c *Connection) GetRemoteIP() string {
 // Table 返回客户端表。
 func (c *Connection) Table() *ClientTable {
 	return c.table
+}
+
+func (c *Connection) handlePong(data interface{}) {
+	// 类型断言：把 interface{} 类型的 data 转成 string。
+	ts, ok := data.(string)
+	if !ok {
+		return
+	}
+
+	// 解析 RFC3339Nano 格式的时间字符串
+	sentAt, err := time.Parse(time.RFC3339Nano, ts)
+	if err != nil {
+		return
+	}
+	c.mu.Lock()
+	c.latency = time.Since(sentAt)
+	c.mu.Unlock()
+}
+
+func (c *Connection) Latency() time.Duration {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.latency
+}
+
+func (c *Connection) LastPingAt() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastPingAt
 }

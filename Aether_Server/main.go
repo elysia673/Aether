@@ -225,6 +225,7 @@ func main() {
 		ClientToken: cfg.Auth.ClientToken,
 		PublicIP:    publicIP,
 	})
+	clientMgr.StartHealthCheck()
 
 	// 初始化 CA
 	caCertPath := filepath.Join(cfg.DataDir, "ca.crt")

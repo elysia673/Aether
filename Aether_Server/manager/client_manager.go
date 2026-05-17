@@ -10,12 +10,14 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"time"
 )
 
 // Config 客户端管理器配置
 type Config struct {
 	ClientToken    string                                  // 客户端注册令牌
 	PublicIP       string                                  // 服务器公网 IP
+	PingInterval   time.Duration                           // 心跳间隔
 	OnClientReady  func(clientID string, conn *Connection) // 客户端注册完成回调
 	OnRelayMessage func(clientID string, msg interface{})  // 中继消息回调
 }
@@ -35,6 +37,7 @@ type ClientManager struct {
 
 // NewClientManager 创建客户端管理器
 func NewClientManager(cfg Config) *ClientManager {
+	cfg.PingInterval = 30 * time.Second
 	return &ClientManager{
 		config:    cfg,
 		portIndex: make(map[int]string),
@@ -109,12 +112,17 @@ func (m *ClientManager) ListClients() []ClientInfo {
 		if !ok {
 			return true
 		}
+		conn := table.Conn()
+		lat := conn.Latency()
+		online := time.Since(conn.LastPingAt()) < 2*m.config.PingInterval
 		list = append(list, ClientInfo{
 			ID:          table.ClientID(),
 			RemoteAddr:  table.RemoteAddr(),
 			ConnectedAt: table.ConnectedAt(),
 			ProxyCount:  table.ProxyCount(),
 			Host:        table.Host(),
+			Latency:     lat.Truncate(time.Millisecond).String(),
+			Online:      online,
 		})
 		return true
 	})
@@ -140,6 +148,8 @@ type ClientInfo struct {
 	ConnectedAt int64  `json:"connected_at"`
 	ProxyCount  int    `json:"proxy_count"`
 	Host        string `json:"host"`
+	Latency     string `json:"latency"`
+	Online      bool   `json:"online"`
 }
 
 // RegisterPendingRequest 注册待处理的请求。
@@ -283,4 +293,28 @@ func (m *ClientManager) RangeClients(fn func(clientID string, table *ClientTable
 		}
 		return fn(clientID, table)
 	})
+}
+
+func (m *ClientManager) StartHealthCheck() {
+	go func() {
+		ticker := time.NewTicker(m.config.PingInterval)
+		for range ticker.C {
+			m.clients.Range(func(key, value any) bool {
+				table, ok := value.(*ClientTable)
+				if !ok {
+					return true
+				}
+				conn := table.Conn()
+				now := time.Now()
+				conn.mu.Lock()
+				conn.lastPingAt = now
+				conn.mu.Unlock()
+				conn.WriteJSON(&model.WSMessage{
+					Type: "ping",
+					Data: now.Format(time.RFC3339Nano),
+				})
+				return true
+			})
+		}
+	}()
 }
