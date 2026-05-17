@@ -54,6 +54,9 @@ type Handler struct {
 	tunnelCtxs map[string]context.CancelFunc
 	relay      *relayManager
 
+	proxyMu   sync.RWMutex
+	proxyInfo map[string]*model.CommandData
+
 	// 更新状态
 	updateMu      sync.Mutex
 	updateData    []byte
@@ -70,6 +73,7 @@ func New(cfg Config) *Handler {
 		baseCtx:    ctx,
 		baseCancel: cancel,
 		tunnelCtxs: make(map[string]context.CancelFunc),
+		proxyInfo:  make(map[string]*model.CommandData),
 	}
 	relayMgr := newRelayManager(cfg, ctx)
 	h.relay = relayMgr
@@ -104,6 +108,8 @@ func (h *Handler) Handle(msg *model.WSMessage) {
 		h.handleProxy(msg.Data)
 	case "proxy_closed":
 		h.handleProxyClosed(msg.Data)
+	case "tunnel_request":
+		h.handleTunnelRequest(msg.Data)
 	case "relay_signal":
 		if h.relay != nil {
 			h.relay.handleRelaySignal(msg.Data)
@@ -294,6 +300,10 @@ func (h *Handler) handleProxyClosed(data interface{}) {
 	alog.Info(alog.CatProxy, "proxy closed by server, stopping tunnel", "key", closed.Key)
 	h.stopTunnel(closed.Key)
 
+	h.proxyMu.Lock()
+	delete(h.proxyInfo, closed.Key)
+	h.proxyMu.Unlock()
+
 	// 回复确认
 	if h.sender != nil {
 		ack := model.WSMessage{
@@ -354,20 +364,86 @@ func (h *Handler) handleProxy(data interface{}) {
 
 	tunnelCtx, tunnelCancel := context.WithCancel(h.baseCtx)
 	h.registerTunnel(key, tunnelCancel)
-	const tunnelPoolSize = 1
-	for i := 0; i < tunnelPoolSize; i++ {
-		go func(id int) {
-			defer func() {
-				if r := recover(); r != nil {
-					alog.Error(alog.CatTunnel, "PANIC in tunnel goroutine", "id", id, "error", r)
-				}
-				if id == 0 {
-					h.stopTunnel(key)
-				}
-			}()
-			h.runTunnel(tunnelCtx, cmd.ServerHost, cmd.RemotePort, cmd.Token, cmd.LocalPort, cmd.LocalIP, cmd.TunnelPort)
-		}(i)
+	_ = tunnelCtx
+
+	h.proxyMu.Lock()
+	h.proxyInfo[key] = cmd
+	h.proxyMu.Unlock()
+}
+
+func (h *Handler) handleTunnelRequest(data interface{}) {
+	req, err := unmarshalData[model.TunnelRequestData](data)
+	if err != nil {
+		alog.Error(alog.CatProxy, "tunnel_request unmarshal error", "error", err)
+		return
 	}
+
+	h.proxyMu.RLock()
+	info := h.proxyInfo[req.Key]
+	h.proxyMu.RUnlock()
+
+	if info == nil {
+		alog.Warn(alog.CatProxy, "tunnel_request: no proxy info for key", "key", req.Key)
+		return
+	}
+
+	localAddr := net.JoinHostPort(info.LocalIP, fmt.Sprintf("%d", info.LocalPort))
+	tunnelAddr := net.JoinHostPort(info.ServerHost, fmt.Sprintf("%d", info.TunnelPort))
+
+	alog.Info(alog.CatProxy, "tunnel_request: connecting", "key", req.Key, "local", localAddr, "tunnel", tunnelAddr)
+
+	go h.connectAndPipe(tunnelAddr, localAddr, req.Token)
+}
+
+func (h *Handler) connectAndPipe(tunnelAddr, localAddr, token string) {
+	tunnelConn, err := net.DialTimeout("tcp", tunnelAddr, 10*time.Second)
+	if err != nil {
+		alog.Error(alog.CatTunnel, "tunnel dial failed", "addr", tunnelAddr, "error", err)
+		return
+	}
+	defer tunnelConn.Close()
+
+	if err := proto.WriteTunnelAuth(tunnelConn, token); err != nil {
+		alog.Error(alog.CatTunnel, "tunnel auth write failed", "error", err)
+		return
+	}
+
+	ack := make([]byte, 1)
+	tunnelConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	if _, err := io.ReadFull(tunnelConn, ack); err != nil || ack[0] != 0x01 {
+		alog.Error(alog.CatTunnel, "tunnel ack failed", "error", err)
+		return
+	}
+	tunnelConn.SetReadDeadline(time.Time{})
+
+	localConn, err := net.DialTimeout("tcp", localAddr, 10*time.Second)
+	if err != nil {
+		alog.Error(alog.CatTunnel, "local dial failed", "addr", localAddr, "error", err)
+		return
+	}
+	defer localConn.Close()
+
+	alog.Info(alog.CatTunnel, "tunnel paired, piping", "local", localAddr)
+	pipeTCP(tunnelConn, localConn)
+}
+
+func pipeTCP(a, b net.Conn) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		defer a.Close()
+		io.Copy(a, b)
+	}()
+
+	go func() {
+		defer wg.Done()
+		defer b.Close()
+		io.Copy(b, a)
+	}()
+
+	wg.Wait()
 }
 
 func (h *Handler) runTunnel(ctx context.Context, serverHost string, remotePort int, token string, localPort int, localIP string, tunnelPort int) {

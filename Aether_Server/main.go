@@ -163,6 +163,8 @@ func restoreClientProxies(cfg *config.ServerConfig, clientMgr *manager.ClientMan
 			if p.Protocol == "websocket" {
 				table.StoreWSToken(token, fmt.Sprintf("%s-%d", clientID, p.RemotePort))
 				go h.StartWSProxy(p.RemotePort, p.BindAddr, table, token)
+			} else if p.Protocol == "udp" {
+				go h.StartUDPProxy(p.RemotePort, p.BindAddr, table, token)
 			} else {
 				table.StoreTunnelToken(token, fmt.Sprintf("%s-%d", clientID, p.RemotePort))
 				go h.StartTCPProxy(p.RemotePort, p.BindAddr, table, token)
@@ -316,7 +318,7 @@ func main() {
 
 	// 启动隧道监听器
 	if cfg.Server.TunnelPort > 0 {
-		tunnelListener, err := handler.NewTunnelListener(cfg.Server.TunnelPort, clientMgr)
+		tunnelListener, err := handler.NewTunnelListener(cfg.Server.TunnelPort, clientMgr, apiHandler)
 		if err != nil {
 			alog.Fatal(alog.CatTunnel, "初始化隧道监听器失败", "error", err)
 		}

@@ -37,6 +37,11 @@ type ProxyClosedData struct {
 	Key string `json:"key"`
 }
 
+type TunnelRequestData struct {
+	Key   string `json:"key"`
+	Token string `json:"token"`
+}
+
 type ListPortsCmd struct {
 	RequestID string `json:"request_id"`
 }

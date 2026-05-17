@@ -3,9 +3,10 @@ package handler
 import (
 	"Aether/Aether_Server/manager"
 	alog "Aether/common/log"
-	"Aether/common/mux"
-	"Aether/common/proto"
-	"bufio"
+	"Aether/common/model"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,7 +15,60 @@ import (
 	"time"
 )
 
-// StartTCPProxy 启动 TCP 代理监听
+type pendingEntry struct {
+	ch        chan net.Conn
+	createdAt time.Time
+}
+
+var (
+	pendingMu  sync.Mutex
+	pendingMap = make(map[string]*pendingEntry)
+)
+
+func registerPending(token string) chan net.Conn {
+	ch := make(chan net.Conn, 1)
+	pendingMu.Lock()
+	pendingMap[token] = &pendingEntry{ch: ch, createdAt: time.Now()}
+	pendingMu.Unlock()
+	return ch
+}
+
+func takePending(token string) chan net.Conn {
+	pendingMu.Lock()
+	entry := pendingMap[token]
+	if entry != nil {
+		delete(pendingMap, token)
+	}
+	pendingMu.Unlock()
+	if entry != nil {
+		return entry.ch
+	}
+	return nil
+}
+
+func removePending(token string) {
+	pendingMu.Lock()
+	delete(pendingMap, token)
+	pendingMu.Unlock()
+}
+
+func init() {
+	go func() {
+		for {
+			time.Sleep(30 * time.Second)
+			pendingMu.Lock()
+			now := time.Now()
+			for token, entry := range pendingMap {
+				if now.Sub(entry.createdAt) > 60*time.Second {
+					delete(pendingMap, token)
+				}
+			}
+			pendingMu.Unlock()
+		}
+	}()
+}
+
+// StartTCPProxy 启动 TCP 代理监听（autossh 模式：每连接一条隧道）
 func (h *APIHandler) StartTCPProxy(port int, bindAddr string, table *manager.ClientTable, token string) {
 	if bindAddr == "" {
 		bindAddr = "0.0.0.0"
@@ -27,7 +81,6 @@ func (h *APIHandler) StartTCPProxy(port int, bindAddr string, table *manager.Cli
 	defer ln.Close()
 
 	key := table.TunnelKey(port)
-	clientID := table.ClientID()
 
 	proxy := table.GetProxy(port)
 	if proxy != nil {
@@ -41,12 +94,8 @@ func (h *APIHandler) StartTCPProxy(port int, bindAddr string, table *manager.Cli
 		})
 	}
 
-	defer func() {
-		table.RemoveTunnel(key)
-	}()
-
 	table.SetPending(key)
-	alog.Info(alog.CatProxy, "TCP proxy listening", "port", port, "client_id", clientID)
+	alog.Info(alog.CatProxy, "TCP proxy listening", "port", port, "client_id", table.ClientID())
 
 	for {
 		conn, err := ln.Accept()
@@ -56,201 +105,91 @@ func (h *APIHandler) StartTCPProxy(port int, bindAddr string, table *manager.Cli
 			}
 			continue
 		}
-
-		go handleTCPConnection(conn, key, token, table)
+		go h.handlePublicConn(conn, key, table)
 	}
 }
 
-func handleTCPConnection(conn net.Conn, key string, token string, table *manager.ClientTable) {
-	defer func() {
-		if r := recover(); r != nil {
-			alog.Error(alog.CatProxy, "handleTCPConnection panic", "error", r)
-		}
-	}()
-
+func (h *APIHandler) handlePublicConn(conn net.Conn, key string, table *manager.ClientTable) {
 	remoteAddr := conn.RemoteAddr().String()
-	alog.Info(alog.CatProxy, "new TCP connection", "remote", remoteAddr, "key", key)
+	alog.Info(alog.CatProxy, "public connection, requesting tunnel", "remote", remoteAddr, "key", key)
 
-	br := bufio.NewReader(conn)
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	tunnelToken := genRandomToken(16)
+	pendingCh := registerPending(tunnelToken)
+	defer removePending(tunnelToken)
+	defer conn.Close()
 
-	if proto.IsTunnelConn(br) {
-		receivedToken, err := proto.ReadTunnelAuth(br)
-		conn.SetReadDeadline(time.Time{})
+	reqData, err := json.Marshal(model.TunnelRequestData{
+		Key:   key,
+		Token: tunnelToken,
+	})
+	if err != nil {
+		alog.Error(alog.CatProxy, "marshal tunnel_request failed", "error", err)
+		return
+	}
 
-		if err == nil && receivedToken == token {
-			alog.Info(alog.CatTunnel, "tunnel connection established, creating multiplexer", "key", key, "remote", remoteAddr)
+	notify := model.WSMessage{
+		Type: "tunnel_request",
+		Data: string(reqData),
+	}
+	if err := table.Conn().WriteJSON(&notify); err != nil {
+		alog.Error(alog.CatProxy, "send tunnel_request failed", "remote", remoteAddr, "error", err)
+		return
+	}
 
-			mx := mux.New(&bufferedConn{reader: br, conn: conn})
-
-			if _, err := conn.Write([]byte{0x01}); err != nil {
-				alog.Error(alog.CatTunnel, "send tunnel ack failed", "error", err)
-				conn.Close()
-				return
-			}
-
-			table.PutMultiplexer(key, mx)
-			alog.Info(alog.CatMux, "multiplexer created", "key", key)
-
-			<-mx.Done()
-			table.RemoveMux(key, mx)
-			alog.Info(alog.CatMux, "multiplexer closed", "key", key)
+	select {
+	case tunnelConn := <-pendingCh:
+		if _, err := tunnelConn.Write([]byte{0x01}); err != nil {
+			alog.Error(alog.CatProxy, "send tunnel ack failed", "error", err)
+			tunnelConn.Close()
 			return
 		}
+		alog.Info(alog.CatProxy, "tunnel paired", "remote", remoteAddr, "key", key)
+		pipeBidir(conn, tunnelConn)
+	case <-time.After(60 * time.Second):
+		alog.Warn(alog.CatProxy, "tunnel pairing timeout", "remote", remoteAddr, "key", key)
+	}
+}
 
-		if err != nil {
-			alog.Error(alog.CatAuth, "tunnel auth failed", "remote", remoteAddr, "error", err)
-		} else {
-			alog.Warn(alog.CatAuth, "token mismatch", "remote", remoteAddr)
-		}
-		conn.Close()
+// AcceptTunnel 接受客户端隧道连接并配对公网连接
+func (h *APIHandler) AcceptTunnel(tunnelConn net.Conn, token string) {
+	ch := takePending(token)
+	if ch == nil {
+		alog.Warn(alog.CatProxy, "no pending public connection for tunnel token")
+		tunnelConn.Close()
 		return
 	}
 
-	conn.SetReadDeadline(time.Time{})
-	alog.Info(alog.CatProxy, "public connection, getting multiplexer", "remote", remoteAddr, "key", key)
-
-	mx, err := table.GetMultiplexer(key)
-	if err != nil {
-		alog.Error(alog.CatMux, "no multiplexer available", "key", key, "error", err)
-		conn.Close()
-		return
+	select {
+	case ch <- tunnelConn:
+	case <-time.After(5 * time.Second):
+		alog.Warn(alog.CatProxy, "public connection already gone, dropping tunnel")
+		tunnelConn.Close()
 	}
-
-	port := table.GetProxyPort(key)
-	if port == 0 {
-		alog.Error(alog.CatProxy, "cannot get port", "key", key)
-		conn.Close()
-		return
-	}
-
-	channel, err := mx.OpenChannel(uint16(port))
-	if err != nil {
-		alog.Error(alog.CatMux, "create channel failed", "key", key, "error", err)
-		conn.Close()
-		return
-	}
-
-	alog.Info(alog.CatMux, "channel opened", "port", channel.Port, "remote", remoteAddr)
-
-	wrappedConn := &bufferedConn{reader: br, conn: conn}
-	go handleChannel(wrappedConn, channel, key)
 }
 
-type bufferedConn struct {
-	reader io.Reader
-	conn   net.Conn
-}
-
-func (bc *bufferedConn) Read(b []byte) (int, error) {
-	return bc.reader.Read(b)
-}
-
-func (bc *bufferedConn) Write(b []byte) (int, error) {
-	return bc.conn.Write(b)
-}
-
-func (bc *bufferedConn) Close() error {
-	return bc.conn.Close()
-}
-
-func (bc *bufferedConn) LocalAddr() net.Addr {
-	return bc.conn.LocalAddr()
-}
-
-func (bc *bufferedConn) RemoteAddr() net.Addr {
-	return bc.conn.RemoteAddr()
-}
-
-func (bc *bufferedConn) SetDeadline(t time.Time) error {
-	return bc.conn.SetDeadline(t)
-}
-
-func (bc *bufferedConn) SetReadDeadline(t time.Time) error {
-	return bc.conn.SetReadDeadline(t)
-}
-
-func (bc *bufferedConn) SetWriteDeadline(t time.Time) error {
-	return bc.conn.SetWriteDeadline(t)
-}
-
-func handleChannel(publicConn net.Conn, channel *mux.Channel, key string) {
-	defer func() {
-		if r := recover(); r != nil {
-			alog.Error(alog.CatMux, "handleChannel panic", "error", r, "port", channel.Port)
-		}
-		publicConn.Close()
-	}()
-
+func pipeBidir(a, b net.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	// 用户 → 隧道（优先 splice 零拷贝）
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				alog.Error(alog.CatMux, "handleChannel publicRead panic", "error", r, "port", channel.Port)
-			}
-			publicConn.Close()
-			wg.Done()
-		}()
-
-		// 尝试 splice
-		if tc, ok := publicConn.(*net.TCPConn); ok && channel.Mux.SpliceAvailable() {
-			if f, err := tc.File(); err == nil {
-				fd := int(f.Fd())
-				defer f.Close()
-				for {
-					if err := channel.Mux.SpliceSend(channel.Port, fd, mux.MaxFrameSize); err != nil {
-						break
-					}
-				}
-				channel.Mux.CloseChannel(channel.Port)
-				return
-			}
-		}
-
-		// 回退：Read→Send
-		buf := make([]byte, mux.MaxFrameSize)
-		for {
-			n, err := publicConn.Read(buf)
-			if err != nil {
-				if err != io.EOF {
-					alog.Error(alog.CatMux, "public read error", "port", channel.Port, "error", err)
-				}
-				break
-			}
-			if err := channel.Mux.Send(channel.Port, buf[:n]); err != nil {
-				alog.Error(alog.CatMux, "mux send error", "port", channel.Port, "error", err)
-				break
-			}
-		}
-		channel.Mux.CloseChannel(channel.Port)
+		defer wg.Done()
+		defer a.Close()
+		io.Copy(a, b)
 	}()
 
-	// 隧道 → 用户
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				alog.Error(alog.CatMux, "handleChannel publicWrite panic", "error", r, "port", channel.Port)
-			}
-			publicConn.Close()
-			wg.Done()
-		}()
-		for {
-			data, ok := channel.ReceiveBlocking()
-			if !ok {
-				break
-			}
-			if _, err := publicConn.Write(data); err != nil {
-				alog.Error(alog.CatMux, "public write error", "port", channel.Port, "error", err)
-				break
-			}
-			// 消费数据后发送窗口更新
-			channel.Mux.SendWindowUpdate(channel.Port, len(data))
-		}
+		defer wg.Done()
+		defer b.Close()
+		io.Copy(b, a)
 	}()
 
 	wg.Wait()
-	alog.Info(alog.CatMux, "channel closed", "port", channel.Port, "key", key)
+}
+
+func genRandomToken(length int) string {
+	b := make([]byte, length)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand failed: " + err.Error())
+	}
+	return hex.EncodeToString(b)
 }

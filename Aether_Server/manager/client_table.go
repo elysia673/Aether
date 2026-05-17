@@ -2,10 +2,12 @@ package manager
 
 import (
 	"Aether/common/mux"
+	alog "Aether/common/log"
 	"fmt"
 	"io"
 	"net"
 	"sync"
+	"time"
 )
 
 // ProxyInfo 代理信息。
@@ -164,13 +166,20 @@ func (t *ClientTable) GetMultiplexer(key string) (*mux.Multiplexer, error) {
 }
 
 func (t *ClientTable) RemoveTunnel(key string) {
+	t0 := time.Now()
 	t.tunnelMu.Lock()
-	if m := t.multiplexers[key]; m != nil {
-		m.Close()
+	alog.Info(alog.CatMux, "removeTunnel lock acquired", "key", key, "elapsed", time.Since(t0))
+	m := t.multiplexers[key]
+	if m != nil {
 		delete(t.multiplexers, key)
 	}
 	delete(t.pending, key)
 	t.tunnelMu.Unlock()
+	alog.Info(alog.CatMux, "removeTunnel unlock done", "key", key, "total", time.Since(t0))
+
+	if m != nil {
+		go m.Close()
+	}
 }
 
 func (t *ClientTable) RemoveMux(key string, mx *mux.Multiplexer) {
@@ -269,10 +278,17 @@ func (t *ClientTable) Cleanup() {
 	t.proxyMu.Unlock()
 
 	t.tunnelMu.Lock()
+	muxes := make([]*mux.Multiplexer, 0, len(t.multiplexers))
 	for _, mx := range t.multiplexers {
-		mx.Close()
+		muxes = append(muxes, mx)
 	}
+	t.multiplexers = make(map[string]*mux.Multiplexer)
+	t.pending = make(map[string]bool)
 	t.tunnelMu.Unlock()
+
+	for _, mx := range muxes {
+		go mx.Close()
+	}
 
 	t.udpMu.Lock()
 	for _, c := range t.udpTunnels {

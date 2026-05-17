@@ -28,10 +28,12 @@ const (
 	MaxFrameSize    = 65535
 	workerCount     = 4
 	windowSize      = 1024 * 1024 // 1MB 流控窗口
-	sendQueueSize   = 64          // 每通道发送队列大小
+	sendQueueSize   = 64
+	ctrlQueueSize   = 32
+	windowThreshold = 16 * 1024    // 累积 16KB 才发 WINDOW_UPDATE
+	windowInterval  = 10 * time.Millisecond // 最长 10ms 发一次
 )
 
-// 包类型
 const (
 	PktData         uint16 = 0x0000
 	PktOpen         uint16 = 0x0001
@@ -39,20 +41,24 @@ const (
 	PktWindowUpdate uint16 = 0x0003
 )
 
-// frameOut 待发送的帧
 type frameOut struct {
 	port  uint16
 	data  []byte
-	srcFd int // splice 源 fd，-1 表示普通写入
-	n     int // splice 字节数
-	ctrl  bool // 控制帧（不参与流控）
+	srcFd int
+	n     int
+	ctrl  bool
 }
 
-// frameIn 接收到的帧
 type frameIn struct {
 	port  uint16
 	ptype uint16
 	data  []byte
+}
+
+// ctrlFrame 控制帧（不走 sendQueue，直接写）
+type ctrlFrame struct {
+	port  uint16
+	ptype uint16
 }
 
 // Channel 虚拟通道
@@ -63,9 +69,13 @@ type Channel struct {
 	Mux       *Multiplexer
 	closeOnce sync.Once
 
-	// 流控
-	sendQueue  chan frameOut // 发送队列
-	sendWindow int32         // 可用发送窗口（字节）
+	sendQueue  chan frameOut
+	sendWindow int32
+
+	// WINDOW_UPDATE 累积
+	pendingConsumed int32         // 累积待发送的消费量
+	lastWUTime      time.Time     // 上次发送 WINDOW_UPDATE 的时间
+	wuMu            sync.Mutex    // 保护 pendingConsumed 和 lastWUTime
 }
 
 // Multiplexer 多路复用器
@@ -73,24 +83,25 @@ type Multiplexer struct {
 	conn         net.Conn
 	connFdFile   *os.File
 	channels     map[uint16]*Channel
-	lock         sync.RWMutex // 保护 channels
-	writeLock    sync.Mutex   // 保护 conn 写入
+	lock         sync.RWMutex
+	writeLock    sync.Mutex
 	workChan     chan frameIn
+	ctrlChan     chan ctrlFrame // 控制帧队列
 	closed       atomic.Bool
 	closeOnce    sync.Once
 	closeChan    chan struct{}
-	writeNotify  chan struct{} // 通知 writeLoop 有新数据
+	writeNotify  chan struct{}
 	spliceAvail  bool
 	LocalTarget  string
 	OnNewChannel func(ch *Channel)
 }
 
-// New 创建多路复用器
 func New(conn net.Conn) *Multiplexer {
 	m := &Multiplexer{
 		conn:        conn,
 		channels:    make(map[uint16]*Channel),
 		workChan:    make(chan frameIn, 64),
+		ctrlChan:    make(chan ctrlFrame, ctrlQueueSize),
 		closeChan:   make(chan struct{}),
 		writeNotify: make(chan struct{}, 1),
 	}
@@ -117,7 +128,6 @@ func New(conn net.Conn) *Multiplexer {
 	return m
 }
 
-// notifyWrite 通知 writeLoop 有新数据
 func (m *Multiplexer) notifyWrite() {
 	select {
 	case m.writeNotify <- struct{}{}:
@@ -125,7 +135,7 @@ func (m *Multiplexer) notifyWrite() {
 	}
 }
 
-// writeLoop 写入 TCP：轮询所有通道的发送队列
+// writeLoop 写入 TCP：优先处理控制帧，然后轮询数据帧
 func (m *Multiplexer) writeLoop() {
 	idleTimer := time.NewTimer(time.Second)
 	defer idleTimer.Stop()
@@ -135,7 +145,25 @@ func (m *Multiplexer) writeLoop() {
 			return
 		}
 
-		// 收集所有通道
+		// 1. 优先处理控制帧
+		madeProgress := false
+		select {
+		case cf := <-m.ctrlChan:
+			m.writeLock.Lock()
+			err := m.writeCtrl(cf.port, cf.ptype)
+			m.writeLock.Unlock()
+			if err != nil {
+				if !m.closed.Load() {
+					alog.Error(alog.CatMux, "ctrl write error", "error", err)
+				}
+				m.Close()
+				return
+			}
+			madeProgress = true
+		default:
+		}
+
+		// 2. 处理数据帧
 		m.lock.RLock()
 		channels := make([]*Channel, 0, len(m.channels))
 		for _, ch := range m.channels {
@@ -143,10 +171,11 @@ func (m *Multiplexer) writeLoop() {
 		}
 		m.lock.RUnlock()
 
-		if len(channels) == 0 {
-			// 无通道，等待通知或超时
+		if len(channels) == 0 && !madeProgress {
 			select {
 			case <-m.writeNotify:
+				continue
+			case <-m.ctrlChan:
 				continue
 			case <-m.closeChan:
 				return
@@ -156,7 +185,6 @@ func (m *Multiplexer) writeLoop() {
 			}
 		}
 
-		madeProgress := false
 		for _, ch := range channels {
 			select {
 			case frame := <-ch.sendQueue:
@@ -169,9 +197,9 @@ func (m *Multiplexer) writeLoop() {
 				}
 				m.writeLock.Unlock()
 				if err != nil {
-				if !m.closed.Load() {
-					alog.Error(alog.CatMux, "mux write error", "error", err)
-				}
+					if !m.closed.Load() {
+						alog.Error(alog.CatMux, "mux write error", "error", err)
+					}
 					m.Close()
 					return
 				}
@@ -183,6 +211,7 @@ func (m *Multiplexer) writeLoop() {
 		if !madeProgress {
 			select {
 			case <-m.writeNotify:
+			case <-m.ctrlChan:
 			case <-m.closeChan:
 				return
 			}
@@ -190,7 +219,7 @@ func (m *Multiplexer) writeLoop() {
 	}
 }
 
-// writeFrame 写入一帧到 TCP
+// writeFrame 写入数据帧
 func (m *Multiplexer) writeFrame(port uint16, data []byte, ctrl bool) error {
 	dataLen := len(data)
 	if dataLen > MaxFrameSize {
@@ -199,7 +228,7 @@ func (m *Multiplexer) writeFrame(port uint16, data []byte, ctrl bool) error {
 
 	ptype := PktData
 	if ctrl {
-		ptype = PktOpen // 具体类型由调用方通过 data 编码
+		ptype = PktOpen
 	}
 
 	buf := make([]byte, FrameHeaderSize+dataLen)
@@ -219,13 +248,34 @@ func (m *Multiplexer) writeFrame(port uint16, data []byte, ctrl bool) error {
 	return nil
 }
 
-// writeFrameSplice splice 零拷贝写入（Linux only）
+// writeCtrl 写入控制帧（已持有 writeLock）
+func (m *Multiplexer) writeCtrl(port uint16, ptype uint16) error {
+	if m.closed.Load() {
+		return fmt.Errorf("multiplexer closed")
+	}
+
+	frame := make([]byte, FrameHeaderSize)
+	binary.BigEndian.PutUint16(frame[0:2], Magic)
+	binary.BigEndian.PutUint16(frame[2:4], port)
+	binary.BigEndian.PutUint16(frame[4:6], 0)
+	binary.BigEndian.PutUint16(frame[6:8], ptype)
+
+	for written := 0; written < len(frame); {
+		n, err := m.conn.Write(frame[written:])
+		written += n
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeFrameSplice splice 零拷贝写入（已持有 writeLock）
 func (m *Multiplexer) writeFrameSplice(port uint16, srcFd int, n int) error {
 	if n > MaxFrameSize {
 		n = MaxFrameSize
 	}
 
-	// 先 splice 到 pipe，获取实际字节数
 	pr, pw, err := os.Pipe()
 	if err != nil {
 		return fmt.Errorf("create pipe: %w", err)
@@ -241,9 +291,8 @@ func (m *Multiplexer) writeFrameSplice(port uint16, srcFd int, n int) error {
 		pw.Close()
 		return fmt.Errorf("splice: EOF")
 	}
-	pw.Close() // 关闭写端，让读端知道数据已写完
+	pw.Close()
 
-	// 写正确的 header（使用实际字节数）
 	header := make([]byte, FrameHeaderSize)
 	binary.BigEndian.PutUint16(header[0:2], Magic)
 	binary.BigEndian.PutUint16(header[2:4], port)
@@ -254,7 +303,6 @@ func (m *Multiplexer) writeFrameSplice(port uint16, srcFd int, n int) error {
 		return err
 	}
 
-	// splice pipe → conn
 	_, err = spliceFd(int(pr.Fd()), m.connFd(), int(spliced))
 	return err
 }
@@ -266,12 +314,10 @@ func (m *Multiplexer) connFd() int {
 	return -1
 }
 
-// SpliceAvailable 是否支持 splice
 func (m *Multiplexer) SpliceAvailable() bool {
 	return m.spliceAvail
 }
 
-// readLoop 读取 TCP 数据，解析帧，分发到 workChan
 func (m *Multiplexer) readLoop() {
 	defer func() {
 		m.lock.Lock()
@@ -287,14 +333,14 @@ func (m *Multiplexer) readLoop() {
 	for {
 		if _, err := io.ReadFull(m.conn, header); err != nil {
 			if !m.closed.Load() {
-				alog.Error(alog.CatMux, "mux read header error", "error", err)
+				alog.Error(alog.CatMux, "read header error", "error", err)
 			}
 			return
 		}
 
 		magic := binary.BigEndian.Uint16(header[0:2])
 		if magic != Magic {
-			alog.Error(alog.CatMux, "mux invalid magic", "magic", fmt.Sprintf("0x%04x", magic))
+			alog.Error(alog.CatMux, "invalid magic", "magic", fmt.Sprintf("0x%04x", magic))
 			return
 		}
 
@@ -303,7 +349,7 @@ func (m *Multiplexer) readLoop() {
 		ptype := binary.BigEndian.Uint16(header[6:8])
 
 		if dataLen > MaxFrameSize {
-			alog.Error(alog.CatMux, "mux frame too large", "size", dataLen)
+			alog.Error(alog.CatMux, "frame too large", "size", dataLen)
 			return
 		}
 
@@ -311,7 +357,7 @@ func (m *Multiplexer) readLoop() {
 		if dataLen > 0 {
 			data = make([]byte, dataLen)
 			if _, err := io.ReadFull(m.conn, data); err != nil {
-				alog.Error(alog.CatMux, "mux read data error", "error", err)
+				alog.Error(alog.CatMux, "read data error", "error", err)
 				return
 			}
 		}
@@ -324,7 +370,6 @@ func (m *Multiplexer) readLoop() {
 	}
 }
 
-// worker 消费者
 func (m *Multiplexer) worker() {
 	for {
 		select {
@@ -339,7 +384,6 @@ func (m *Multiplexer) worker() {
 	}
 }
 
-// dispatch 分发帧到对应通道
 func (m *Multiplexer) dispatch(port uint16, ptype uint16, data []byte) {
 	switch ptype {
 	case PktData:
@@ -349,13 +393,12 @@ func (m *Multiplexer) dispatch(port uint16, ptype uint16, data []byte) {
 	case PktWindowUpdate:
 		m.handleWindowUpdate(port, data)
 	case PktOpen:
-		// OPEN 帧由服务端处理，客户端忽略
+		// OPEN 帧由服务端处理
 	default:
-		alog.Warn(alog.CatMux, "mux unknown packet type", "type", fmt.Sprintf("0x%04x", ptype))
+		alog.Warn(alog.CatMux, "unknown packet type", "type", fmt.Sprintf("0x%04x", ptype))
 	}
 }
 
-// dispatchData 分发数据帧到通道
 func (m *Multiplexer) dispatchData(port uint16, data []byte) {
 	m.lock.RLock()
 	ch, ok := m.channels[port]
@@ -370,16 +413,13 @@ func (m *Multiplexer) dispatchData(port uint16, data []byte) {
 		return
 	}
 
-	// 通道不存在，创建新通道
 	if m.OnNewChannel == nil {
 		return
 	}
 
 	m.lock.Lock()
-	// 双重检查
 	if _, exists := m.channels[port]; exists {
 		m.lock.Unlock()
-		// 已存在，重新分发
 		m.dispatchData(port, data)
 		return
 	}
@@ -390,6 +430,7 @@ func (m *Multiplexer) dispatchData(port uint16, data []byte) {
 		Mux:        m,
 		sendQueue:  make(chan frameOut, sendQueueSize),
 		sendWindow: windowSize,
+		lastWUTime: time.Now(),
 	}
 	m.channels[port] = ch
 	m.lock.Unlock()
@@ -403,7 +444,6 @@ func (m *Multiplexer) dispatchData(port uint16, data []byte) {
 	}
 }
 
-// handleWindowUpdate 处理窗口更新帧
 func (m *Multiplexer) handleWindowUpdate(port uint16, data []byte) {
 	if len(data) < 4 {
 		return
@@ -419,12 +459,13 @@ func (m *Multiplexer) handleWindowUpdate(port uint16, data []byte) {
 	}
 }
 
-// enqueueFrame 入队发送帧
 func (m *Multiplexer) enqueueFrame(ch *Channel, frame frameOut) error {
 	select {
 	case ch.sendQueue <- frame:
 		m.notifyWrite()
 		return nil
+	case <-ch.CloseChan:
+		return fmt.Errorf("channel closed")
 	case <-m.closeChan:
 		return fmt.Errorf("multiplexer closed")
 	}
@@ -444,27 +485,28 @@ func (m *Multiplexer) Send(port uint16, data []byte) error {
 		return fmt.Errorf("channel %d not found", port)
 	}
 
-	// 流控：等待窗口（带超时避免 busy-wait）
+	// 流控：等待窗口
 	dataLen := int32(len(data))
 	for atomic.LoadInt32(&ch.sendWindow) < dataLen {
-		if m.closed.Load() {
+		select {
+		case <-ch.CloseChan:
+			return fmt.Errorf("channel closed")
+		case <-m.closeChan:
 			return fmt.Errorf("multiplexer closed")
+		default:
+			time.Sleep(100 * time.Microsecond)
 		}
-		// 短暂等待后重试
-		time.Sleep(100 * time.Microsecond)
 	}
 
-	// 扣减窗口
 	atomic.AddInt32(&ch.sendWindow, -dataLen)
 
-	// 复制数据
 	buf := make([]byte, len(data))
 	copy(buf, data)
 
 	return m.enqueueFrame(ch, frameOut{port: port, data: buf, srcFd: -1})
 }
 
-// SpliceSend 零拷贝发送（Linux only）
+// SpliceSend 零拷贝发送
 func (m *Multiplexer) SpliceSend(port uint16, srcFd int, n int) error {
 	if m.closed.Load() {
 		return fmt.Errorf("multiplexer closed")
@@ -486,10 +528,14 @@ func (m *Multiplexer) SpliceSend(port uint16, srcFd int, n int) error {
 
 	n32 := int32(n)
 	for atomic.LoadInt32(&ch.sendWindow) < n32 {
-		if m.closed.Load() {
+		select {
+		case <-ch.CloseChan:
+			return fmt.Errorf("channel closed")
+		case <-m.closeChan:
 			return fmt.Errorf("multiplexer closed")
+		default:
+			time.Sleep(100 * time.Microsecond)
 		}
-		time.Sleep(100 * time.Microsecond)
 	}
 
 	atomic.AddInt32(&ch.sendWindow, -n32)
@@ -497,33 +543,16 @@ func (m *Multiplexer) SpliceSend(port uint16, srcFd int, n int) error {
 	return m.enqueueFrame(ch, frameOut{port: port, data: nil, srcFd: srcFd, n: n})
 }
 
-// sendCtrlFrame 发送控制帧（通过 writeLock 保护写入）
-func (m *Multiplexer) sendCtrlFrame(port uint16, ptype uint16) error {
+// enqueueCtrl 入队控制帧（阻塞等待，确保不丢帧）
+func (m *Multiplexer) enqueueCtrl(port uint16, ptype uint16) {
 	if m.closed.Load() {
-		return fmt.Errorf("multiplexer closed")
+		return
 	}
-
-	m.writeLock.Lock()
-	defer m.writeLock.Unlock()
-
-	if m.closed.Load() {
-		return fmt.Errorf("multiplexer closed")
+	select {
+	case m.ctrlChan <- ctrlFrame{port: port, ptype: ptype}:
+		m.notifyWrite()
+	case <-m.closeChan:
 	}
-
-	frame := make([]byte, FrameHeaderSize)
-	binary.BigEndian.PutUint16(frame[0:2], Magic)
-	binary.BigEndian.PutUint16(frame[2:4], port)
-	binary.BigEndian.PutUint16(frame[4:6], 0)
-	binary.BigEndian.PutUint16(frame[6:8], ptype)
-
-	for written := 0; written < len(frame); {
-		n, err := m.conn.Write(frame[written:])
-		written += n
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // OpenChannel 打开通道并发送 OPEN 帧
@@ -543,11 +572,11 @@ func (m *Multiplexer) OpenChannel(port uint16) (*Channel, error) {
 		Mux:        m,
 		sendQueue:  make(chan frameOut, sendQueueSize),
 		sendWindow: windowSize,
+		lastWUTime: time.Now(),
 	}
 	m.channels[port] = ch
 
-	// 发送 OPEN 帧
-	go m.sendCtrlFrame(port, PktOpen)
+	go m.enqueueCtrl(port, PktOpen)
 
 	return ch, nil
 }
@@ -555,13 +584,11 @@ func (m *Multiplexer) OpenChannel(port uint16) (*Channel, error) {
 // CloseChannel 关闭通道并发送 CLOSE 帧
 func (m *Multiplexer) CloseChannel(port uint16) {
 	m.closeChannelLocal(port)
-
 	if !m.closed.Load() {
-		go m.sendCtrlFrame(port, PktClose)
+		go m.enqueueCtrl(port, PktClose)
 	}
 }
 
-// closeChannelLocal 本地关闭通道（不发送 CLOSE 帧）
 func (m *Multiplexer) closeChannelLocal(port uint16) {
 	m.lock.Lock()
 	ch, ok := m.channels[port]
@@ -571,38 +598,100 @@ func (m *Multiplexer) closeChannelLocal(port uint16) {
 	m.lock.Unlock()
 
 	if ok {
-		ch.closeOnce.Do(func() { close(ch.CloseChan) })
+		ch.closeOnce.Do(func() {
+			close(ch.CloseChan)
+			for {
+				select {
+				case <-ch.DataChan:
+				default:
+					return
+				}
+			}
+		})
 	}
 }
 
-// SendWindowUpdate 发送窗口更新帧（消费数据后调用）
+// SendWindowUpdate 累积式窗口更新：超过阈值或超时才发送
 func (m *Multiplexer) SendWindowUpdate(port uint16, consumed int) error {
-	return m.sendCtrlFrame(port, PktWindowUpdate)
+	if m.closed.Load() {
+		return fmt.Errorf("multiplexer closed")
+	}
+
+	m.lock.RLock()
+	ch, ok := m.channels[port]
+	m.lock.RUnlock()
+
+	if !ok {
+		return nil
+	}
+
+	ch.wuMu.Lock()
+	ch.pendingConsumed += int32(consumed)
+	shouldSend := ch.pendingConsumed >= windowThreshold ||
+		time.Since(ch.lastWUTime) >= windowInterval
+	if shouldSend {
+		data := make([]byte, 4)
+		binary.BigEndian.PutUint32(data, uint32(ch.pendingConsumed))
+		ch.pendingConsumed = 0
+		ch.lastWUTime = time.Now()
+		ch.wuMu.Unlock()
+
+		// 通过 ctrlChan 发送
+		if !m.closed.Load() {
+			// WINDOW_UPDATE 带数据，需要特殊处理
+			m.writeLock.Lock()
+			err := m.writeWindowUpdate(port, data)
+			m.writeLock.Unlock()
+			return err
+		}
+		return nil
+	}
+	ch.wuMu.Unlock()
+	return nil
 }
 
-// Close 关闭多路复用器
+// writeWindowUpdate 写入 WINDOW_UPDATE 帧（已持有 writeLock）
+func (m *Multiplexer) writeWindowUpdate(port uint16, data []byte) error {
+	buf := make([]byte, FrameHeaderSize+4)
+	binary.BigEndian.PutUint16(buf[0:2], Magic)
+	binary.BigEndian.PutUint16(buf[2:4], port)
+	binary.BigEndian.PutUint16(buf[4:6], 4)
+	binary.BigEndian.PutUint16(buf[6:8], PktWindowUpdate)
+	copy(buf[FrameHeaderSize:], data)
+
+	for written := 0; written < len(buf); {
+		n, err := m.conn.Write(buf[written:])
+		written += n
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *Multiplexer) Close() {
 	m.closeOnce.Do(func() {
+		t0 := time.Now()
 		m.closed.Store(true)
 		close(m.closeChan)
+		t1 := time.Now()
 		if m.connFdFile != nil {
 			m.connFdFile.Close()
 		}
+		alog.Info(alog.CatMux, "mux.Close before conn.Close", "elapsedSinceCloseChan", time.Since(t1))
 		m.conn.Close()
+		alog.Info(alog.CatMux, "mux.Close done", "total", time.Since(t0))
 	})
 }
 
-// Done 返回关闭信号
 func (m *Multiplexer) Done() <-chan struct{} {
 	return m.closeChan
 }
 
-// GetConn 获取底层连接
 func (m *Multiplexer) GetConn() net.Conn {
 	return m.conn
 }
 
-// Receive 非阻塞接收
 func (ch *Channel) Receive() ([]byte, bool) {
 	select {
 	case data := <-ch.DataChan:
@@ -614,13 +703,11 @@ func (ch *Channel) Receive() ([]byte, bool) {
 	}
 }
 
-// ReceiveBlocking 阻塞接收，优先排空缓冲区
 func (ch *Channel) ReceiveBlocking() ([]byte, bool) {
 	select {
 	case data := <-ch.DataChan:
 		return data, true
 	case <-ch.CloseChan:
-		// 排空剩余数据
 		for {
 			select {
 			case data := <-ch.DataChan:
@@ -632,7 +719,6 @@ func (ch *Channel) ReceiveBlocking() ([]byte, bool) {
 	}
 }
 
-// HandleChannel 处理通道：连接本地服务，双向转发（客户端使用）
 func (m *Multiplexer) HandleChannel(ch *Channel) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -667,7 +753,7 @@ func (m *Multiplexer) HandleChannel(ch *Channel) {
 				}
 				return
 			}
-			// 消费数据后发送窗口更新
+			// 消费数据后发送窗口更新（累积式）
 			m.SendWindowUpdate(ch.Port, len(data))
 		}
 	}()
@@ -686,6 +772,7 @@ func (m *Multiplexer) HandleChannel(ch *Channel) {
 					}
 				}
 				f.Close()
+				m.CloseChannel(ch.Port)
 				return
 			}
 		}
@@ -697,15 +784,16 @@ func (m *Multiplexer) HandleChannel(ch *Channel) {
 				if err != io.EOF {
 					alog.Error(alog.CatTunnel, "local read error", "port", ch.Port, "error", err)
 				}
-				return
+				break
 			}
 			if err := m.Send(ch.Port, buf[:n]); err != nil {
 				alog.Error(alog.CatTunnel, "send error", "port", ch.Port, "error", err)
-				return
+				break
 			}
 		}
+		m.CloseChannel(ch.Port)
 	}()
 
 	wg.Wait()
-	alog.Info(alog.CatTunnel, "port closed", "port", ch.Port)
+	alog.Info(alog.CatTunnel, "channel closed", "port", ch.Port)
 }

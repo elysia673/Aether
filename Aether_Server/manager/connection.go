@@ -271,7 +271,7 @@ func (c *Connection) writePump() {
 	}
 }
 
-// WriteJSON 将 v 序列化为 JSON 并通过发送通道写入。
+// WriteJSON 将 v 序列化为 JSON 并通过发送通道写入（带超时）。
 func (c *Connection) WriteJSON(v interface{}) (err error) {
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -281,6 +281,8 @@ func (c *Connection) WriteJSON(v interface{}) (err error) {
 	case c.send <- data:
 	case <-c.done:
 		return fmt.Errorf("connection closed")
+	case <-time.After(3 * time.Second):
+		return fmt.Errorf("write timeout")
 	}
 	return nil
 }

@@ -26,8 +26,8 @@ type udpSession struct {
 	lastActive time.Time
 }
 
-// startUDPProxy 启动 UDP 代理
-func (h *APIHandler) startUDPProxy(port int, bindAddr string, table *manager.ClientTable, token string) {
+// StartUDPProxy 启动 UDP 代理
+func (h *APIHandler) StartUDPProxy(port int, bindAddr string, table *manager.ClientTable, token string) {
 	key := table.TunnelKey(port)
 	clientID := table.ClientID()
 

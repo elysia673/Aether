@@ -111,14 +111,29 @@ func (h *APIHandler) CreateProxy(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, model.Error(500, "failed to marshal command"))
 		return
 	}
+	publicAddr := h.domain
+	if publicAddr == "" {
+		publicAddr = h.clientMgr.GetPublicIP()
+	}
+
 	cmd := model.WSMessage{
 		Type: "proxy",
 		Data: string(cmdData),
 	}
 
-	if err := h.clientMgr.SendCommand(clientID, cmd); err != nil {
-		c.JSON(http.StatusInternalServerError, model.Error(500, "failed to send command: "+err.Error()))
-		return
+	result := make(chan error, 1)
+	go func() {
+		result <- h.clientMgr.SendCommand(clientID, cmd)
+	}()
+
+	select {
+	case err := <-result:
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, model.Error(500, "failed to send command: "+err.Error()))
+			return
+		}
+	case <-time.After(8 * time.Second):
+		alog.Warn(alog.CatProxy, "send proxy command taking too long, continuing", "clientID", clientID)
 	}
 
 	table.AddProxy(&manager.ProxyInfo{
@@ -130,7 +145,6 @@ func (h *APIHandler) CreateProxy(c *gin.Context) {
 	})
 	h.clientMgr.RegisterPort(clientID, req.RemotePort)
 
-	// 持久化保存
 	h.store.Add(storage.ProxyRecord{
 		ClientID:   clientID,
 		RemotePort: req.RemotePort,
@@ -144,18 +158,12 @@ func (h *APIHandler) CreateProxy(c *gin.Context) {
 		table.StoreWSToken(token, fmt.Sprintf("%s-%d", clientID, req.RemotePort))
 		go h.StartWSProxy(req.RemotePort, req.BindAddr, table, token)
 	} else if req.Protocol == "udp" {
-		// UDP 协议使用专用的 UDP 代理
-		go h.startUDPProxy(req.RemotePort, req.BindAddr, table, token)
+		go h.StartUDPProxy(req.RemotePort, req.BindAddr, table, token)
 	} else {
-		// TCP 协议使用隧道代理
 		table.StoreTunnelToken(token, fmt.Sprintf("%s-%d", clientID, req.RemotePort))
 		go h.StartTCPProxy(req.RemotePort, req.BindAddr, table, token)
 	}
 
-	publicAddr := h.domain
-	if publicAddr == "" {
-		publicAddr = h.clientMgr.GetPublicIP()
-	}
 	c.JSON(http.StatusOK, model.Success(gin.H{
 		"public_addr": publicAddr + ":" + strconv.Itoa(req.RemotePort),
 	}))

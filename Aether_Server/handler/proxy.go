@@ -33,47 +33,69 @@ func (h *APIHandler) CloseProxy(c *gin.Context) {
 
 	key := table.TunnelKey(port)
 
-	// 注册待确认通道
-	ackCh := make(chan struct{}, 1)
-	h.clientMgr.RegisterPendingClose(key, ackCh)
-	defer h.clientMgr.UnregisterPendingClose(key)
+	conn := table.Conn()
 
-	// 发送关闭请求给客户端
-	notifyMsg := model.WSMessage{
-		Type: "proxy_closed",
-		Data: map[string]string{"key": key},
-	}
-	if err := table.Conn().WriteJSON(&notifyMsg); err != nil {
-		alog.Error(alog.CatProxy, "send proxy_closed failed", "error", err)
-		// 客户端已断开，直接清理
-		h.cleanupProxy(table, port, key, clientID)
-		c.JSON(http.StatusOK, model.Success(gin.H{"message": "proxy closed"}))
-		return
-	}
+	result := make(chan error, 1)
+	go func() {
+		result <- h.cleanupProxy(table, port, key, clientID)
+	}()
 
-	// 等待客户端确认（5秒超时）
 	select {
-	case <-ackCh:
-		alog.Info(alog.CatProxy, "client acked proxy_closed", "key", key)
-	case <-time.After(5 * time.Second):
-		alog.Warn(alog.CatProxy, "client ack timeout", "key", key)
+	case err := <-result:
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, model.Error(500, "cleanup failed: "+err.Error()))
+			return
+		}
+	case <-time.After(8 * time.Second):
+		alog.Warn(alog.CatProxy, "cleanup taking too long, continuing", "port", port)
 	}
 
-	// 清理状态
-	h.cleanupProxy(table, port, key, clientID)
+	go func() {
+		notifyMsg := model.WSMessage{
+			Type: "proxy_closed",
+			Data: map[string]string{"key": key},
+		}
+		conn.WriteJSON(&notifyMsg)
+	}()
 
 	c.JSON(http.StatusOK, model.Success(gin.H{"message": "proxy closed"}))
 }
 
-func (h *APIHandler) cleanupProxy(table *manager.ClientTable, port int, key string, clientID string) {
+func (h *APIHandler) cleanupProxy(table *manager.ClientTable, port int, key string, clientID string) error {
+	alog.Info(alog.CatProxy, "cleanup start", "port", port, "key", key)
+
+	t0 := time.Now()
 	ln := table.GetProxyListener(port)
+	alog.Info(alog.CatProxy, "cleanup step1 getListener", "port", port, "elapsed", time.Since(t0))
+
+	if ln != nil {
+		t1 := time.Now()
+		if err := ln.Close(); err != nil {
+			alog.Error(alog.CatProxy, "close listener failed", "port", port, "error", err, "elapsed", time.Since(t1))
+		} else {
+			alog.Info(alog.CatProxy, "close listener ok", "port", port, "elapsed", time.Since(t1))
+		}
+	}
+
+	t2 := time.Now()
+	table.RemoveTunnel(key)
+	alog.Info(alog.CatProxy, "cleanup step2 removeTunnel", "port", port, "elapsed", time.Since(t2))
+
+	t3 := time.Now()
 	table.RemoveProxy(port)
 	table.RemoveTunnelTokenByKey(key)
 	h.clientMgr.UnregisterPort(port)
-	h.store.Remove(clientID, port)
-	if ln != nil {
-		ln.Close()
+	alog.Info(alog.CatProxy, "cleanup step3 removeState", "port", port, "elapsed", time.Since(t3))
+
+	t4 := time.Now()
+	if err := h.store.Remove(clientID, port); err != nil {
+		alog.Error(alog.CatProxy, "remove from storage failed", "port", port, "error", err, "elapsed", time.Since(t4))
+	} else {
+		alog.Info(alog.CatProxy, "cleanup step4 removeStorage", "port", port, "elapsed", time.Since(t4))
 	}
+
+	alog.Info(alog.CatProxy, "cleanup done", "port", port)
+	return nil
 }
 
 func (h *APIHandler) ListProxies(c *gin.Context) {
