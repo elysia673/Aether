@@ -6,11 +6,14 @@ package main
 
 import (
 	"bytes"
+	"crypto/md5"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"os"
@@ -177,6 +180,25 @@ func main() {
 			os.Exit(1)
 		}
 		cmdRelayClose(args[1])
+	case "update":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "用法: aether-cli update <server|client> <binary-path> [options]\n")
+			os.Exit(1)
+		}
+		switch args[1] {
+		case "server":
+			if len(args) < 3 {
+				fmt.Fprintf(os.Stderr, "用法: aether-cli update server <binary-path>\n")
+				os.Exit(1)
+			}
+			cmdUpdateServer(args[2])
+		case "client":
+			cmdUpdateClient(args[2:])
+		default:
+			fmt.Fprintf(os.Stderr, "未知子命令: %s\n", args[1])
+			fmt.Fprintf(os.Stderr, "用法: aether-cli update <server|client> <binary-path> [options]\n")
+			os.Exit(1)
+		}
 	case "help":
 		printUsage()
 	default:
@@ -208,6 +230,8 @@ func printUsage() {
   relay <落地端A> <服务端B> [options]  A监听端口 → B的服务端口
   relay-sessions                列出中继会话
   relay-close <session-id>      关闭中继会话
+  update server <path>          更新服务端二进制
+  update client <path>          更新客户端二进制
   help                          显示帮助
 
 注册申请选项:
@@ -237,6 +261,10 @@ relay 选项:
   -source-ip <ip>       源端监听 IP (默认 0.0.0.0)
   -source-peer <addr>   源端直连对端地址 (ip:port)，同 LAN 时指定内网 IP
   -target-peer <addr>   目标端直连对端地址 (ip:port)，同 LAN 时指定内网 IP
+
+update 选项:
+  -f <path>             二进制文件路径 (必填)
+  -target <id>          目标客户端 ID 或 all (client 子命令必填)
 
 全局选项:
   -config <path>      配置文件路径 (默认 ~/.aether_config.json)
@@ -760,6 +788,144 @@ func cmdRelayClose(sessionID string) {
 		os.Exit(1)
 	}
 	fmt.Printf("中继会话已关闭 (%s)\n", sessionID)
+}
+
+func cmdUpdateServer(binaryPath string) {
+	md5sum := calcMD5(binaryPath)
+	fmt.Printf("文件: %s\n", binaryPath)
+	fmt.Printf("MD5:  %s\n", md5sum)
+	fmt.Println("正在更新服务端...")
+	uploadBinary(binaryPath, cfg.Server+"/api/v1/update", md5sum)
+	fmt.Println("服务端更新成功，正在重启...")
+}
+
+func cmdUpdateClient(args []string) {
+	fs := flag.NewFlagSet("update client", flag.ExitOnError)
+	binaryPath := fs.String("f", "", "二进制文件路径 (必填)")
+	target := fs.String("target", "", "目标客户端 ID 或 all (必填)")
+	fs.Parse(args)
+
+	if *binaryPath == "" || *target == "" {
+		fmt.Fprintf(os.Stderr, "用法: aether-cli update client -f <binary-path> -target <client-id|all>\n")
+		os.Exit(1)
+	}
+
+	md5sum := calcMD5(*binaryPath)
+	fmt.Printf("文件: %s\n", *binaryPath)
+	fmt.Printf("MD5:  %s\n", md5sum)
+
+	if *target == "all" {
+		updateAllClients(*binaryPath, md5sum)
+	} else {
+		updateClient(*binaryPath, md5sum, *target)
+	}
+}
+
+func calcMD5(binaryPath string) string {
+	file, err := os.Open(binaryPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "打开文件失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer file.Close()
+
+	hash := md5.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		fmt.Fprintf(os.Stderr, "计算 MD5 失败: %v\n", err)
+		os.Exit(1)
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func uploadBinary(binaryPath, url, md5sum string) {
+	file, err := os.Open(binaryPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "打开文件失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer file.Close()
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	writer.WriteField("md5", md5sum)
+
+	part, err := writer.CreateFormFile("binary", filepath.Base(binaryPath))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "创建表单失败: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err := io.Copy(part, file); err != nil {
+		fmt.Fprintf(os.Stderr, "读取文件失败: %v\n", err)
+		os.Exit(1)
+	}
+	writer.Close()
+
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "创建请求失败: %v\n", err)
+		os.Exit(1)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+cfg.Token)
+
+	fmt.Println("正在上传...")
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "请求失败: %v\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		fmt.Fprintf(os.Stderr, "更新失败 (HTTP %d): %s\n", resp.StatusCode, string(respBody))
+		os.Exit(1)
+	}
+
+	var result struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	json.Unmarshal(respBody, &result)
+
+	if result.Code != 0 {
+		fmt.Fprintf(os.Stderr, "更新失败: %s\n", result.Msg)
+		os.Exit(1)
+	}
+}
+
+func updateClient(binaryPath, md5sum, clientID string) {
+	fmt.Printf("正在更新客户端 %s...\n", clientID)
+	uploadBinary(binaryPath, cfg.Server+"/api/v1/clients/"+clientID+"/update", md5sum)
+	fmt.Printf("更新已发送到客户端 %s\n", clientID)
+}
+
+func updateAllClients(binaryPath, md5sum string) {
+	// 获取所有客户端
+	resp, err := apiRequest("GET", "/api/v1/clients", nil)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "获取客户端列表失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	var data struct {
+		Clients []struct {
+			ID string `json:"id"`
+		} `json:"clients"`
+	}
+	json.Unmarshal(resp.Data, &data)
+
+	if len(data.Clients) == 0 {
+		fmt.Println("没有在线客户端")
+		return
+	}
+
+	fmt.Printf("找到 %d 个在线客户端\n", len(data.Clients))
+	for _, c := range data.Clients {
+		fmt.Printf("  更新 %s...\n", c.ID)
+		uploadBinary(binaryPath, cfg.Server+"/api/v1/clients/"+c.ID+"/update", md5sum)
+	}
+	fmt.Println("所有客户端更新已发送")
 }
 
 func cmdLogin(args ...string) {

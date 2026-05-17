@@ -6,7 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log"
+	alog "Aether/common/log"
 	"net"
 	"sync"
 	"time"
@@ -55,7 +55,7 @@ func UDPPunch(ctx context.Context, sess *Session) (*net.UDPConn, error) {
 	}
 
 	localPort := conn.LocalAddr().(*net.UDPAddr).Port
-	log.Printf("P2P UDP: bound on :%d, punching to %s", localPort, peerAddr.String())
+	alog.Info(alog.CatRelay, "P2P UDP bound, punching", "port", localPort, "peer", peerAddr.String())
 
 	done := make(chan struct{})
 	var established bool
@@ -146,7 +146,7 @@ func UDPPunch(ctx context.Context, sess *Session) (*net.UDPConn, error) {
 			establishedMu.Unlock()
 			close(done)
 			conn.SetReadDeadline(time.Time{})
-			log.Printf("P2P UDP: hole punched successfully with %s", remote.String())
+			alog.Info(alog.CatRelay, "P2P UDP hole punched", "remote", remote.String())
 			return conn, nil
 		}
 
@@ -156,7 +156,7 @@ func UDPPunch(ctx context.Context, sess *Session) (*net.UDPConn, error) {
 			establishedMu.Unlock()
 			close(done)
 			conn.SetReadDeadline(time.Time{})
-			log.Printf("P2P UDP: hole punched successfully with %s", remote.String())
+			alog.Info(alog.CatRelay, "P2P UDP hole punched", "remote", remote.String())
 			return conn, nil
 		}
 	}
@@ -208,7 +208,7 @@ retryLoop:
 			continue
 		}
 
-		log.Printf("P2P TCP: connected to %s", conn.RemoteAddr().String())
+		alog.Info(alog.CatRelay, "P2P TCP connected", "remote", conn.RemoteAddr().String())
 		resultCh <- conn
 		return <-resultCh, nil
 	}

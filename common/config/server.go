@@ -10,6 +10,8 @@ type ServerConfig struct {
 	TLS      TLSSettings    `json:"tls"`
 	Auth     AuthSettings   `json:"auth"`
 	Storage  string         `json:"storage"`
+	DataDir  string         `json:"data_dir"`
+	LogPath  string         `json:"log_path"`
 	PublicIP string         `json:"public_ip"`
 }
 
@@ -42,6 +44,7 @@ func defaultServerConfig() *ServerConfig {
 			KeyFile:  "ssl/key.pem",
 		},
 		Storage: "data/proxies.json",
+		DataDir: "data",
 	}
 }
 
@@ -72,6 +75,8 @@ func LoadServer(path string) (*ServerConfig, error) {
 
 	// other
 	cfg.Storage = envStr("AETHER_STORAGE", cfg.Storage)
+	cfg.DataDir = envStr("AETHER_DATA_DIR", cfg.DataDir)
+	cfg.LogPath = envStr("AETHER_LOG_PATH", cfg.LogPath)
 	cfg.PublicIP = envStr("AETHER_PUBLIC_IP", cfg.PublicIP)
 
 	// validate

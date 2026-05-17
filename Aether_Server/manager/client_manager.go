@@ -27,6 +27,7 @@ type Config struct {
 type ClientManager struct {
 	clients         sync.Map       // clientID -> *ClientTable
 	pendingRequests sync.Map       // requestID -> chan *PortsListData
+	pendingClose    sync.Map       // key -> chan struct{} (proxy close ack)
 	config          Config         // 管理器配置
 	portIndex       map[int]string // port -> clientID 索引
 	portIdxMu       sync.RWMutex   // 端口索引锁
@@ -149,6 +150,29 @@ func (m *ClientManager) RegisterPendingRequest(requestID string, ch chan *model.
 // UnregisterPendingRequest 注销待处理的请求。
 func (m *ClientManager) UnregisterPendingRequest(requestID string) {
 	m.pendingRequests.Delete(requestID)
+}
+
+// RegisterPendingClose 注册待处理的关闭请求。
+func (m *ClientManager) RegisterPendingClose(key string, ch chan struct{}) {
+	m.pendingClose.Store(key, ch)
+}
+
+// UnregisterPendingClose 注销待处理的关闭请求。
+func (m *ClientManager) UnregisterPendingClose(key string) {
+	m.pendingClose.Delete(key)
+}
+
+// GetPendingClose 获取待处理的关闭请求通道。
+func (m *ClientManager) GetPendingClose(key string) (chan struct{}, bool) {
+	val, ok := m.pendingClose.Load(key)
+	if !ok {
+		return nil, false
+	}
+	ch, ok := val.(chan struct{})
+	if !ok {
+		return nil, false
+	}
+	return ch, true
 }
 
 // GetPendingRequest 获取待处理的请求通道。

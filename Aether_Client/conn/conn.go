@@ -7,7 +7,7 @@ import (
 	"Aether/common/model"
 	"encoding/json"
 	"fmt"
-	"log"
+	alog "Aether/common/log"
 	"sync"
 	"time"
 
@@ -69,14 +69,14 @@ func (c *Connection) readPump() {
 		_, msg, err := c.wsConn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("conn: read error: %v", err)
+				alog.Error(alog.CatClient, "ws read error", "err", err)
 			}
 			break
 		}
 
 		var wsMsg model.WSMessage
 		if err := json.Unmarshal(msg, &wsMsg); err != nil {
-			log.Printf("conn: unmarshal error: %v", err)
+			alog.Error(alog.CatClient, "ws unmarshal error", "err", err)
 			continue
 		}
 

@@ -1,6 +1,7 @@
 package handler
 
 import (
+	alog "Aether/common/log"
 	"Aether/common/model"
 	"Aether/common/mux"
 	"Aether/common/wsconn"
@@ -8,7 +9,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -61,14 +61,15 @@ func (rm *relayManager) SetSender(sender MessageSender) {
 func (rm *relayManager) handleRelaySignal(data interface{}) {
 	sig, err := unmarshalData[model.RelaySignalData](data)
 	if err != nil {
-		log.Printf("中继信令解析错误: %v", err)
+		alog.Error(alog.CatRelay, "中继信令解析错误", "error", err)
 		return
 	}
 
-	log.Printf("中继信令: 会话=%s 角色=%s 协议=%s 源端口=%d 目标端口=%d 服务器=%s",
-		sig.SessionID, sig.Role, sig.Protocol, sig.SourcePort, sig.TargetPort, sig.ServerHost)
+	alog.Info(alog.CatRelay, "中继信令",
+		"session", sig.SessionID, "role", sig.Role, "protocol", sig.Protocol,
+		"sourcePort", sig.SourcePort, "targetPort", sig.TargetPort, "server", sig.ServerHost)
 
-	_, cancel := context.WithCancel(rm.baseCtx)
+	ctx, cancel := context.WithCancel(rm.baseCtx)
 
 	sess := &relaySession{
 		id:            sig.SessionID,
@@ -88,9 +89,9 @@ func (rm *relayManager) handleRelaySignal(data interface{}) {
 	rm.mu.Unlock()
 
 	if sig.Role == "source" {
-		go rm.runSource(sess)
+		go rm.runSource(ctx, sess)
 	} else {
-		go rm.runTarget(sess)
+		go rm.runTarget(ctx, sess)
 	}
 }
 
@@ -172,10 +173,10 @@ func (rm *relayManager) cleanupSession(sessionID string) {
 }
 
 // runSource 运行源端中继。
-func (rm *relayManager) runSource(sess *relaySession) {
+func (rm *relayManager) runSource(ctx context.Context, sess *relaySession) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("中继源端 %s panic: %v", sess.id, r)
+			alog.Error(alog.CatRelay, "中继源端 panic", "session", sess.id, "error", r)
 		}
 		rm.cleanupSession(sess.id)
 		rm.sendClosed(sess.id)
@@ -188,11 +189,11 @@ func (rm *relayManager) runSource(sess *relaySession) {
 	relayURL := fmt.Sprintf("%s://%s:9909/relay?session=%s&token=%s&role=source&client_id=%s",
 		scheme, sess.serverHost, sess.id, sess.token, rm.cfg.ClientID)
 
-	log.Printf("中继源端: 正在连接中继 %s", relayURL)
+	alog.Info(alog.CatRelay, "中继源端: 正在连接中继", "session", sess.id, "role", "source", "server", sess.serverHost)
 
 	conn, err := rm.connectRelay(relayURL)
 	if err != nil {
-		log.Printf("中继源端: 中继连接失败: %v", err)
+		alog.Error(alog.CatRelay, "中继源端: 中继连接失败", "error", err)
 		rm.sendEstablished(sess.id, false, err.Error())
 		return
 	}
@@ -203,7 +204,7 @@ func (rm *relayManager) runSource(sess *relaySession) {
 	bindAddr := net.JoinHostPort(sess.sourceLocalIP, fmt.Sprintf("%d", sess.sourcePort))
 	ln, err := net.Listen("tcp", bindAddr)
 	if err != nil {
-		log.Printf("中继源端: 监听 %s 失败: %v", bindAddr, err)
+		alog.Error(alog.CatRelay, "中继源端: 监听失败", "addr", bindAddr, "error", err)
 		conn.Close()
 		rm.sendEstablished(sess.id, false, err.Error())
 		return
@@ -212,10 +213,10 @@ func (rm *relayManager) runSource(sess *relaySession) {
 	defer ln.Close()
 
 	rm.sendEstablished(sess.id, true, "")
-	log.Printf("中继源端: 正在监听 %s", bindAddr)
+	alog.Info(alog.CatRelay, "中继源端: 正在监听", "addr", bindAddr)
 
 	go func() {
-		<-mx.Done()
+		<-ctx.Done()
 		ln.Close()
 	}()
 
@@ -224,21 +225,21 @@ func (rm *relayManager) runSource(sess *relaySession) {
 		if err != nil {
 			return
 		}
-		channel, err := mx.CreateChannel()
+		channel, err := mx.OpenChannel(uint16(sess.sourcePort))
 		if err != nil {
 			localConn.Close()
 			return
 		}
-		log.Printf("中继源端: 新连接，通道 %d", channel.ID)
+		alog.Info(alog.CatRelay, "中继源端: 新连接", "channelPort", channel.Port)
 		go bridgeChannel(localConn, channel, sess.id)
 	}
 }
 
 // runTarget 运行目标端中继。
-func (rm *relayManager) runTarget(sess *relaySession) {
+func (rm *relayManager) runTarget(ctx context.Context, sess *relaySession) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("中继目标端 %s panic: %v", sess.id, r)
+			alog.Error(alog.CatRelay, "中继目标端 panic", "session", sess.id, "error", r)
 		}
 		rm.cleanupSession(sess.id)
 		rm.sendClosed(sess.id)
@@ -251,11 +252,11 @@ func (rm *relayManager) runTarget(sess *relaySession) {
 	relayURL := fmt.Sprintf("%s://%s:9909/relay?session=%s&token=%s&role=target&client_id=%s",
 		scheme, sess.serverHost, sess.id, sess.token, rm.cfg.ClientID)
 
-	log.Printf("中继目标端: 正在连接中继 %s", relayURL)
+	alog.Info(alog.CatRelay, "中继目标端: 正在连接中继", "session", sess.id, "role", "target", "server", sess.serverHost)
 
 	conn, err := rm.connectRelay(relayURL)
 	if err != nil {
-		log.Printf("中继目标端: 中继连接失败: %v", err)
+		alog.Error(alog.CatRelay, "中继目标端: 中继连接失败", "error", err)
 		rm.sendEstablished(sess.id, false, err.Error())
 		return
 	}
@@ -267,10 +268,10 @@ func (rm *relayManager) runTarget(sess *relaySession) {
 	sess.mx = mx
 
 	rm.sendEstablished(sess.id, true, "")
-	log.Printf("中继目标端: 中继就绪，本地目标=%s", localTarget)
+	alog.Info(alog.CatRelay, "中继目标端: 中继就绪", "localTarget", localTarget)
 
 	<-mx.Done()
-	log.Printf("中继目标端: 会话 %s 已关闭", sess.id)
+	alog.Info(alog.CatRelay, "中继目标端: 会话已关闭", "session", sess.id)
 }
 
 // connectRelay 连接到中继服务器。
@@ -316,31 +317,34 @@ func (rm *relayManager) connectRelay(relayURL string) (net.Conn, error) {
 func bridgeChannel(localConn net.Conn, channel *mux.Channel, sessionID string) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("bridgeChannel %s 通道%d panic: %v", sessionID, channel.ID, r)
+			alog.Error(alog.CatRelay, "bridgeChannel panic", "session", sessionID, "channelPort", channel.Port, "error", r)
 		}
-		localConn.Close()
 	}()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	// 本地 → 隧道
 	go func() {
 		defer wg.Done()
-		buf := make([]byte, 65536)
+		defer localConn.Close()
+		buf := make([]byte, mux.MaxFrameSize)
 		for {
 			n, err := localConn.Read(buf)
 			if err != nil {
 				break
 			}
-			if err := channel.Mux.Send(channel.ID, buf[:n]); err != nil {
+			if err := channel.Mux.Send(channel.Port, buf[:n]); err != nil {
 				break
 			}
 		}
-		channel.Mux.CloseChannel(channel.ID)
+		channel.Mux.CloseChannel(channel.Port)
 	}()
 
+	// 隧道 → 本地
 	go func() {
 		defer wg.Done()
+		defer localConn.Close()
 		for {
 			data, ok := channel.ReceiveBlocking()
 			if !ok {

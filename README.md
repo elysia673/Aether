@@ -161,6 +161,8 @@ aether-cli register add -id my-device
     "client_token": "your-client-token"
   },
   "storage": "data/proxies.json",
+  "data_dir": "data",
+  "log_path": "data/server.log",
   "public_ip": ""
 }
 ```
@@ -299,6 +301,8 @@ aether-cli -json clients                  # JSON 输出模式
 | `AETHER_TLS_CERT` | TLS 证书路径 |
 | `AETHER_TLS_KEY` | TLS 私钥路径 |
 | `AETHER_STORAGE` | 存储文件路径 |
+| `AETHER_DATA_DIR` | 数据目录 |
+| `AETHER_LOG_PATH` | 日志文件路径 |
 | `AETHER_PUBLIC_IP` | 公网 IP |
 
 ### 客户端
@@ -312,6 +316,7 @@ aether-cli -json clients                  # JSON 输出模式
 | `AETHER_TLS_SNI` | TLS SNI 主机名 |
 | `AETHER_ORIGIN` | WebSocket Origin 请求头 |
 | `AETHER_RECONNECT_DELAY` | 重连延迟（秒） |
+| `AETHER_LOG_PATH` | 日志文件路径 |
 
 ## 安全机制
 

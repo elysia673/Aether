@@ -1,10 +1,10 @@
 package main
 
 import (
+	alog "Aether/common/log"
 	"Aether/common/config"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"strings"
@@ -34,7 +34,15 @@ func main() {
 
 	cfg, err := config.LoadClient(*configPath)
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		alog.Fatal(alog.CatConfig, "load config failed", "error", err)
+	}
+
+	// 初始化日志文件
+	if cfg.LogPath != "" {
+		if err := alog.SetFile(cfg.LogPath); err != nil {
+			alog.Fatal(alog.CatConfig, "init log file failed", "error", err, "path", cfg.LogPath)
+		}
+		alog.Info(alog.CatConfig, "log file enabled", "path", cfg.LogPath)
 	}
 
 	if cfg.UseHTTP {
@@ -47,9 +55,10 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Println("收到关闭信号")
+		alog.Info(alog.CatSystem, "收到关闭信号")
 		client.Stop()
 	}()
 
 	client.Run()
+	alog.Flush()
 }

@@ -4,9 +4,9 @@
 package storage
 
 import (
+	alog "Aether/common/log"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -48,7 +48,7 @@ func New(path string) (*Storage, error) {
 
 	// 加载已有数据
 	if err := s.load(); err != nil {
-		log.Printf("加载存储文件: %v (将创建新文件)", err)
+		alog.Info(alog.CatConfig, "加载存储文件（将创建新文件）", "error", err)
 	}
 
 	return s, nil
@@ -74,7 +74,7 @@ func (s *Storage) load() error {
 		s.proxies[key] = p
 	}
 
-	log.Printf("加载了 %d 个代理配置", len(s.proxies))
+	alog.Info(alog.CatConfig, "已加载代理配置", "count", len(s.proxies))
 	return nil
 }
 

@@ -1,11 +1,11 @@
 package middleware
 
 import (
+	alog "Aether/common/log"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -16,31 +16,37 @@ import (
 
 var (
 	jwtSecret     []byte
-	jwtSecretFile = "./data/jwt_secret"
-	registerDir   = "./data/registered_keys"
+	jwtSecretFile string
+	registerDir   string
 )
+
+// Init 初始化中间件数据目录
+func Init(dataDir string) {
+	jwtSecretFile = filepath.Join(dataDir, "jwt_secret")
+	registerDir = filepath.Join(dataDir, "registered_keys")
+}
 
 func InitJWTSecret() {
 	// 尝试从文件加载
 	data, err := os.ReadFile(jwtSecretFile)
 	if err == nil && len(data) >= 32 {
 		jwtSecret = data[:32]
-		log.Println("JWT 密钥已从文件加载")
+		alog.Info(alog.CatConfig, "JWT密钥已从文件加载")
 		return
 	}
 
 	// 生成新密钥并保存
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		log.Fatalf("生成 JWT 密钥失败: %v", err)
+		alog.Fatal(alog.CatConfig, "生成JWT密钥失败", "error", err)
 	}
 	jwtSecret = b
 
 	os.MkdirAll(filepath.Dir(jwtSecretFile), 0755)
 	if err := os.WriteFile(jwtSecretFile, b, 0600); err != nil {
-		log.Printf("保存 JWT 密钥失败: %v", err)
+		alog.Error(alog.CatConfig, "保存JWT密钥失败", "error", err)
 	}
-	log.Println("JWT 密钥已随机生成并保存")
+	alog.Info(alog.CatConfig, "JWT密钥已随机生成并保存")
 }
 
 type Claims struct {
@@ -63,14 +69,14 @@ func isKeyRegistered(apiKey string) bool {
 func markKeyRegistered(apiKey string) error {
 	err := os.MkdirAll(registerDir, 0755)
 	if err != nil {
-		log.Printf("创建目录失败: %v (路径: %s)", err, registerDir)
+		alog.Error(alog.CatAuth, "创建目录失败", "error", err, "path", registerDir)
 		return err
 	}
 	path := getKeyFilePath(apiKey)
-	log.Printf("创建占位文件: %s", path)
+	alog.Info(alog.CatAuth, "创建占位文件", "path", path)
 	err = os.WriteFile(path, []byte("registered"), 0644)
 	if err != nil {
-		log.Printf("写入文件失败: %v (路径: %s)", err, path)
+		alog.Error(alog.CatAuth, "写入文件失败", "error", err, "path", path)
 		return err
 	}
 	return nil
@@ -100,14 +106,6 @@ func CleanupExpiredRegistrations() {
 
 // GenerateToken 生成 JWT Token
 func GenerateToken(apiKey string) (string, error) {
-	absPath, _ := filepath.Abs(getKeyFilePath(apiKey))
-	registered := isKeyRegistered(apiKey)
-	log.Printf("检查 API Key 是否已注册: %v (路径: %s, 绝对路径: %s)", registered, getKeyFilePath(apiKey), absPath)
-	
-	if registered {
-		return "", fmt.Errorf("API Key 已注册，请使用已有的 token")
-	}
-
 	claims := Claims{
 		APIKey: apiKey,
 		RegisteredClaims: jwt.RegisteredClaims{
@@ -122,8 +120,9 @@ func GenerateToken(apiKey string) (string, error) {
 		return "", fmt.Errorf("生成 Token 失败: %w", err)
 	}
 
+	// 标记为已注册（用于撤销检查）
 	if err := markKeyRegistered(apiKey); err != nil {
-		return "", fmt.Errorf("记录 API Key 失败: %w", err)
+		alog.Error(alog.CatAuth, "记录API Key失败", "error", err)
 	}
 
 	return tokenStr, nil

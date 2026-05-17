@@ -1,23 +1,12 @@
-# https
 {
-  "server_url": "wss://your-server.com:9909/ws",
-  "client_token": "your-client-token",
-  "client_id": "raspberry-pi-01",
+  "server_url": "wss://example.com:9909/ws",
+  "client_token": "",
+  "client_id": "my-device",
+  "data_dir": "./data",
+  "log_path": "./data/client.log",
   "use_http": false,
   "insecure": false,
   "tls_sni": "",
   "origin": "",
   "reconnect_delay_seconds": 5
-}
-
-# http
-{
-  "server_url": "ws://your-server.com:9909/ws",
-  "client_token": "your-client-token",
-  "client_id": "test-device-01",
-  "use_http": true,
-  "insecure": false,
-  "tls_sni": "",
-  "origin": "",
-  "reconnect_delay_seconds": 3
 }

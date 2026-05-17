@@ -74,6 +74,16 @@ func (t *ClientTable) TunnelKey(port int) string {
 	return fmt.Sprintf("%s-%d", t.clientID, port)
 }
 
+// GetProxyPort 从 key 中提取端口号
+func (t *ClientTable) GetProxyPort(key string) int {
+	for port := range t.proxies {
+		if t.TunnelKey(port) == key {
+			return port
+		}
+	}
+	return 0
+}
+
 // 代理操作
 
 func (t *ClientTable) AddProxy(p *ProxyInfo) {

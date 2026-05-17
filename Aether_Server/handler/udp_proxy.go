@@ -2,11 +2,11 @@ package handler
 
 import (
 	"Aether/Aether_Server/manager"
+	alog "Aether/common/log"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"sync"
 	"time"
@@ -38,13 +38,13 @@ func (h *APIHandler) startUDPProxy(port int, bindAddr string, table *manager.Cli
 	// 监听 UDP 端口
 	udpAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(bindAddr, fmt.Sprintf("%d", port)))
 	if err != nil {
-		log.Printf("UDP 代理地址解析错误: %v", err)
+		alog.Error(alog.CatProxy, "udp proxy address resolve error", "error", err)
 		return
 	}
 
 	udpConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		log.Printf("UDP 代理监听错误: %v", err)
+		alog.Error(alog.CatProxy, "udp proxy listen error", "error", err)
 		return
 	}
 	defer udpConn.Close()
@@ -65,7 +65,7 @@ func (h *APIHandler) startUDPProxy(port int, bindAddr string, table *manager.Cli
 	// 存储 UDP 隧道 token
 	table.StoreTunnelToken(token, key)
 
-	log.Printf("UDP 代理已监听端口 :%d，客户端 %s", port, clientID)
+	alog.Info(alog.CatProxy, "udp proxy listening", "port", port, "client_id", clientID)
 
 	// 等待客户端建立 UDP 隧道
 	// 客户端会通过 TCP 连接发送 "TUNNEL\n" 标记来建立隧道
@@ -99,7 +99,7 @@ func (h *APIHandler) startUDPProxy(port int, bindAddr string, table *manager.Cli
 			if errors.Is(err, net.ErrClosed) {
 				break
 			}
-			log.Printf("UDP 读取错误: %v", err)
+			alog.Error(alog.CatProxy, "udp read error", "error", err)
 			continue
 		}
 
@@ -132,7 +132,7 @@ func (h *APIHandler) startUDPProxy(port int, bindAddr string, table *manager.Cli
 
 		_, err = udpTunnel.Write(packet)
 		if err != nil {
-			log.Printf("UDP 隧道写入错误: %v", err)
+			alog.Error(alog.CatTunnel, "udp tunnel write error", "error", err)
 			table.SetUDPTunnel(key, nil)
 			continue
 		}
@@ -146,12 +146,12 @@ func (h *APIHandler) waitForUDPTunnel(port int, table *manager.ClientTable, toke
 	// 监听 TCP 端口用于 UDP 隧道
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
-		log.Printf("UDP 隧道监听错误: %v", err)
+		alog.Error(alog.CatTunnel, "udp tunnel listen error", "error", err)
 		return
 	}
 	defer ln.Close()
 
-	log.Printf("UDP 隧道监听器已启动，端口 :%d", port)
+	alog.Info(alog.CatTunnel, "udp tunnel listener started", "port", port)
 
 	for {
 		conn, err := ln.Accept()
@@ -173,44 +173,44 @@ func (h *APIHandler) handleUDPTunnelConn(conn net.Conn, table *manager.ClientTab
 	// 读取认证标记 "TUNNEL\n"
 	authBuf := make([]byte, 7)
 	if _, err := io.ReadFull(conn, authBuf); err != nil {
-		log.Printf("UDP 隧道认证读取错误: %v", err)
+		alog.Error(alog.CatAuth, "udp tunnel auth read error", "error", err)
 		return
 	}
 
 	if string(authBuf) != "TUNNEL\n" {
-		log.Printf("UDP 隧道认证标记无效: %q", authBuf)
+		alog.Warn(alog.CatAuth, "udp tunnel auth marker invalid", "marker", string(authBuf))
 		return
 	}
 
 	// 读取 token 长度
 	var tokenLen uint16
 	if err := binary.Read(conn, binary.BigEndian, &tokenLen); err != nil {
-		log.Printf("UDP 隧道 token 长度读取错误: %v", err)
+		alog.Error(alog.CatAuth, "udp tunnel token length read error", "error", err)
 		return
 	}
 
 	// 读取 token
 	tokenBuf := make([]byte, tokenLen)
 	if _, err := io.ReadFull(conn, tokenBuf); err != nil {
-		log.Printf("UDP 隧道 token 读取错误: %v", err)
+		alog.Error(alog.CatAuth, "udp tunnel token read error", "error", err)
 		return
 	}
 
 	// 验证 token
 	if string(tokenBuf) != token {
-		log.Printf("UDP 隧道 token 不匹配")
+		alog.Warn(alog.CatAuth, "udp tunnel token mismatch")
 		return
 	}
 
 	// 发送确认
 	if _, err := conn.Write([]byte{0x01}); err != nil {
-		log.Printf("UDP 隧道确认发送错误: %v", err)
+		alog.Error(alog.CatTunnel, "udp tunnel ack send error", "error", err)
 		return
 	}
 
 	// 注册 UDP 隧道
 	table.SetUDPTunnel(key, conn.(*net.TCPConn))
-	log.Printf("UDP 隧道已注册，key=%s", key)
+	alog.Info(alog.CatTunnel, "udp tunnel registered", "key", key)
 
 	// 读取从客户端返回的 UDP 响应
 	// 格式：[2字节目标端口][2字节数据长度][数据]
@@ -220,24 +220,24 @@ func (h *APIHandler) handleUDPTunnelConn(conn net.Conn, table *manager.ClientTab
 
 		if err := binary.Read(conn, binary.BigEndian, &destPort); err != nil {
 			if err != io.EOF {
-				log.Printf("UDP 隧道读取端口错误: %v", err)
+				alog.Error(alog.CatTunnel, "udp tunnel read port error", "error", err)
 			}
 			break
 		}
 
 		if err := binary.Read(conn, binary.BigEndian, &dataLen); err != nil {
-			log.Printf("UDP 隧道读取长度错误: %v", err)
+			alog.Error(alog.CatTunnel, "udp tunnel read length error", "error", err)
 			break
 		}
 
 		if dataLen > 65535 {
-			log.Printf("UDP 数据包过大: %d", dataLen)
+			alog.Error(alog.CatTunnel, "udp packet too large", "size", dataLen)
 			break
 		}
 
 		data := make([]byte, dataLen)
 		if _, err := io.ReadFull(conn, data); err != nil {
-			log.Printf("UDP 隧道读取数据错误: %v", err)
+			alog.Error(alog.CatTunnel, "udp tunnel read data error", "error", err)
 			break
 		}
 
@@ -250,5 +250,5 @@ func (h *APIHandler) handleUDPTunnelConn(conn net.Conn, table *manager.ClientTab
 
 	// 清理
 	table.SetUDPTunnel(key, nil)
-	log.Printf("UDP 隧道已断开，key=%s", key)
+	alog.Info(alog.CatTunnel, "udp tunnel disconnected", "key", key)
 }

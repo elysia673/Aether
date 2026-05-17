@@ -2,11 +2,11 @@ package handler
 
 import (
 	"Aether/Aether_Server/manager"
+	alog "Aether/common/log"
 	"Aether/common/mux"
 	"Aether/common/proto"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 	"time"
 )
@@ -35,7 +35,7 @@ func NewTunnelListener(port int, clientMgr *manager.ClientManager) (*TunnelListe
 
 // Start 启动隧道监听器
 func (tl *TunnelListener) Start() {
-	log.Printf("Tunnel listener started on %s", tl.listener.Addr())
+	alog.Info(alog.CatTunnel, "tunnel listener started", "addr", tl.listener.Addr())
 
 	for {
 		conn, err := tl.listener.Accept()
@@ -43,7 +43,7 @@ func (tl *TunnelListener) Start() {
 			if errors.Is(err, net.ErrClosed) {
 				break
 			}
-			log.Printf("tunnel accept error: %v", err)
+			alog.Error(alog.CatTunnel, "tunnel accept error", "error", err)
 			continue
 		}
 
@@ -60,12 +60,12 @@ func (tl *TunnelListener) Close() {
 func (tl *TunnelListener) handleTunnelConn(conn net.Conn) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("panic in handleTunnelConn: %v", r)
+			alog.Error(alog.CatTunnel, "handleTunnelConn panic", "error", r)
 		}
 	}()
 
 	remoteAddr := conn.RemoteAddr().String()
-	log.Printf("New tunnel connection from %s", remoteAddr)
+	alog.Info(alog.CatTunnel, "new tunnel connection", "remote", remoteAddr)
 
 	// 读取 token
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -73,7 +73,7 @@ func (tl *TunnelListener) handleTunnelConn(conn net.Conn) {
 	conn.SetReadDeadline(time.Time{})
 
 	if err != nil {
-		log.Printf("tunnel auth failed from %s: %v", remoteAddr, err)
+		alog.Error(alog.CatAuth, "tunnel auth failed", "remote", remoteAddr, "error", err)
 		conn.Close()
 		return
 	}
@@ -81,14 +81,14 @@ func (tl *TunnelListener) handleTunnelConn(conn net.Conn) {
 	// 查找对应的代理
 	proxyKey, table := tl.findProxyByToken(token)
 	if table == nil {
-		log.Printf("tunnel token not found from %s", remoteAddr)
+		alog.Warn(alog.CatAuth, "tunnel token not found", "remote", remoteAddr)
 		conn.Close()
 		return
 	}
 
 	// 发送 ACK
 	if _, err := conn.Write([]byte{0x01}); err != nil {
-		log.Printf("Failed to send ack to tunnel: %v", err)
+		alog.Error(alog.CatTunnel, "send tunnel ack failed", "error", err)
 		conn.Close()
 		return
 	}
@@ -96,11 +96,11 @@ func (tl *TunnelListener) handleTunnelConn(conn net.Conn) {
 	// 创建多路复用器
 	mx := mux.New(conn)
 	table.PutMultiplexer(proxyKey, mx)
-	log.Printf("Tunnel multiplexer created for %s from %s", proxyKey, remoteAddr)
+	alog.Info(alog.CatMux, "tunnel multiplexer created", "key", proxyKey, "remote", remoteAddr)
 
 	<-mx.Done()
 	table.RemoveMux(proxyKey, mx)
-	log.Printf("Tunnel multiplexer closed for %s", proxyKey)
+	alog.Info(alog.CatMux, "tunnel multiplexer closed", "key", proxyKey)
 }
 
 // findProxyByToken 根据 token 查找代理

@@ -1,11 +1,11 @@
 package manager
 
 import (
+	alog "Aether/common/log"
 	"Aether/common/model"
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"sync"
 	"time"
@@ -59,7 +59,7 @@ func (c *Connection) Start() {
 	go func() {
 		time.Sleep(30 * time.Second)
 		if !c.IsRegistered() {
-			log.Println("客户端注册超时，关闭连接")
+			alog.Warn(alog.CatClient, "客户端注册超时，关闭连接")
 			c.Close()
 		}
 	}()
@@ -76,7 +76,7 @@ func (c *Connection) readPump() {
 
 	c.wsConn.SetReadLimit(maxMessageSize)
 	if err := c.wsConn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
-		log.Printf("set initial read deadline error: %v", err)
+		alog.Error(alog.CatMux, "设置初始读截止时间错误", "error", err)
 	}
 	c.wsConn.SetPongHandler(func(string) error {
 		return c.wsConn.SetReadDeadline(time.Now().Add(pongWait))
@@ -86,14 +86,14 @@ func (c *Connection) readPump() {
 		_, msg, err := c.wsConn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("ws read error: %v", err)
+				alog.Error(alog.CatMux, "WebSocket读取错误", "error", err)
 			}
 			break
 		}
 
 		var wsMsg model.WSMessage
 		if err := json.Unmarshal(msg, &wsMsg); err != nil {
-			log.Printf("json unmarshal error: %v", err)
+			alog.Error(alog.CatMux, "JSON反序列化错误", "error", err)
 			continue
 		}
 
@@ -106,16 +106,16 @@ func (c *Connection) handleMessage(msg *model.WSMessage) {
 	case "register":
 		c.handleRegister(msg.Data)
 	case "response":
-		log.Printf("client %s response: %+v", c.clientID, msg.Data)
+		alog.Debug(alog.CatClient, "客户端响应", "clientID", c.clientID, "data", msg.Data)
 	case "ports_list":
 		var portsData model.PortsListData
 		b, err := json.Marshal(msg.Data)
 		if err != nil {
-			log.Printf("ports_list marshal error: %v", err)
+			alog.Error(alog.CatMux, "ports_list序列化错误", "error", err)
 			return
 		}
 		if err := json.Unmarshal(b, &portsData); err != nil {
-			log.Printf("ports_list unmarshal error: %v", err)
+			alog.Error(alog.CatMux, "ports_list反序列化错误", "error", err)
 			return
 		}
 
@@ -125,9 +125,17 @@ func (c *Connection) handleMessage(msg *model.WSMessage) {
 		}
 	case "relay_established", "relay_closed":
 		c.manager.DispatchRelayMessage(c.clientID, msg)
+	case "proxy_close_ack":
+		key, _ := msg.Data.(string)
+		if key != "" {
+			if ch, ok := c.manager.GetPendingClose(key); ok {
+				close(ch)
+				c.manager.UnregisterPendingClose(key)
+			}
+		}
 	case "pong":
 	default:
-		log.Printf("unknown message type: %s", msg.Type)
+		alog.Warn(alog.CatMux, "未知消息类型", "type", msg.Type)
 	}
 }
 
@@ -198,7 +206,7 @@ func (c *Connection) handleRegister(data interface{}) {
 		"server_host": serverHost,
 	})
 	if err != nil {
-		log.Printf("marshal registered response error: %v", err)
+		alog.Error(alog.CatClient, "序列化注册响应错误", "error", err)
 		return
 	}
 	resp := model.WSMessage{
@@ -206,11 +214,11 @@ func (c *Connection) handleRegister(data interface{}) {
 		Data: string(respData),
 	}
 	if err := c.WriteJSON(&resp); err != nil {
-		log.Printf("write registered response error: %v", err)
+		alog.Error(alog.CatClient, "写入注册响应错误", "error", err)
 		return
 	}
 
-	log.Printf("客户端 %s 已注册，server_host=%s", reg.ClientID, serverHost)
+	alog.Info(alog.CatClient, "客户端已注册", "clientID", reg.ClientID, "serverHost", serverHost)
 
 	// 触发客户端注册完成回调
 	c.manager.OnClientReady(reg.ClientID, c)
@@ -219,7 +227,7 @@ func (c *Connection) handleRegister(data interface{}) {
 func (c *Connection) sendError(code int, message string) {
 	errData, err := json.Marshal(model.ErrorData{Code: code, Message: message})
 	if err != nil {
-		log.Printf("marshal error response error: %v", err)
+		alog.Error(alog.CatClient, "序列化错误响应失败", "error", err)
 		return
 	}
 	errMsg := model.WSMessage{
@@ -227,7 +235,7 @@ func (c *Connection) sendError(code int, message string) {
 		Data: string(errData),
 	}
 	if err := c.WriteJSON(&errMsg); err != nil {
-		log.Printf("write error response error: %v", err)
+		alog.Error(alog.CatClient, "写入错误响应失败", "error", err)
 	}
 }
 

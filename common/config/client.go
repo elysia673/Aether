@@ -11,6 +11,8 @@ type ClientConfig struct {
 	ServerURL             string `json:"server_url"`
 	ClientToken           string `json:"client_token"`
 	ClientID              string `json:"client_id"`
+	DataDir               string `json:"data_dir"`
+	LogPath               string `json:"log_path"`
 	PrivateKeyPath        string `json:"private_key_path"`
 	PublicKeyPath         string `json:"public_key_path"`
 	CertificatePath       string `json:"certificate_path"`
@@ -24,6 +26,7 @@ type ClientConfig struct {
 func defaultClientConfig() *ClientConfig {
 	return &ClientConfig{
 		ClientID:              "raspberry-pi-01",
+		DataDir:               "./data",
 		PrivateKeyPath:        "./data/client.key",
 		PublicKeyPath:         "./data/client.pub",
 		CertificatePath:       "./data/server.crt",
@@ -43,6 +46,8 @@ func LoadClient(path string) (*ClientConfig, error) {
 	cfg.ServerURL = envStr("AETHER_WS_URL", cfg.ServerURL)
 	cfg.ClientToken = envStr("AETHER_CLIENT_TOKEN", cfg.ClientToken)
 	cfg.ClientID = envStr("AETHER_CLIENT_ID", cfg.ClientID)
+	cfg.DataDir = envStr("AETHER_DATA_DIR", cfg.DataDir)
+	cfg.LogPath = envStr("AETHER_LOG_PATH", cfg.LogPath)
 	cfg.UseHTTP = envBool("AETHER_USE_HTTP", cfg.UseHTTP)
 	cfg.Insecure = envBool("AETHER_INSECURE", cfg.Insecure)
 	cfg.TLSSNI = envStr("AETHER_TLS_SNI", cfg.TLSSNI)
@@ -54,6 +59,19 @@ func LoadClient(path string) (*ClientConfig, error) {
 	}
 	if cfg.ClientToken == "" {
 		return nil, fmt.Errorf("client_token is required (set in config file or AETHER_CLIENT_TOKEN env)")
+	}
+
+	// 如果路径是相对路径且未自定义，基于 DataDir 推导
+	if cfg.DataDir != "" {
+		if cfg.PrivateKeyPath == defaultClientConfig().PrivateKeyPath {
+			cfg.PrivateKeyPath = filepath.Join(cfg.DataDir, "client.key")
+		}
+		if cfg.PublicKeyPath == defaultClientConfig().PublicKeyPath {
+			cfg.PublicKeyPath = filepath.Join(cfg.DataDir, "client.pub")
+		}
+		if cfg.CertificatePath == defaultClientConfig().CertificatePath {
+			cfg.CertificatePath = filepath.Join(cfg.DataDir, "server.crt")
+		}
 	}
 
 	// 创建目录

@@ -1,6 +1,7 @@
 package register
 
 import (
+	alog "Aether/common/log"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -10,7 +11,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"log"
 	"math/big"
 	"os"
 	"sync"
@@ -36,9 +36,10 @@ type ClientRecord struct {
 
 // Registry 客户端注册表，管理所有已注册的客户端
 type Registry struct {
-	mu      sync.RWMutex
-	clients map[string]*ClientRecord
-	file    string // 持久化文件路径
+	mu             sync.RWMutex
+	clients        map[string]*ClientRecord
+	file           string // 持久化文件路径
+	onClientDelete func(clientID string) // 客户端删除回调
 }
 
 // NewRegistry 创建注册表实例，自动加载已有数据
@@ -49,6 +50,13 @@ func NewRegistry(file string) *Registry {
 	}
 	r.load()
 	return r
+}
+
+// SetOnClientDelete 设置客户端删除回调
+func (r *Registry) SetOnClientDelete(callback func(clientID string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onClientDelete = callback
 }
 
 // AddApplication 添加注册申请（待审核）
@@ -110,14 +118,20 @@ func (r *Registry) Approve(clientID string) ([]byte, error) {
 // Delete 吊销/删除客户端
 func (r *Registry) Delete(clientID string) bool {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
 	if _, exists := r.clients[clientID]; exists {
 		delete(r.clients, clientID)
-		log.Printf("已从内存删除客户端 %s，当前客户端数: %d", clientID, len(r.clients))
+		alog.Info(alog.CatAuth, "已从内存删除客户端 clientID=%s currentCount=%d", clientID, len(r.clients))
 		r.save()
+		callback := r.onClientDelete
+		r.mu.Unlock()
+
+		// 调用回调断开客户端连接
+		if callback != nil {
+			callback(clientID)
+		}
 		return true
 	}
+	r.mu.Unlock()
 	return false
 }
 
@@ -195,9 +209,9 @@ func (r *Registry) load() {
 // save 保存注册表数据到文件
 func (r *Registry) save() {
 	data, _ := json.MarshalIndent(r.clients, "", "  ")
-	log.Printf("保存注册表到 %s，客户端数: %d", r.file, len(r.clients))
+	alog.Info(alog.CatAuth, "保存注册表 path=%s clientCount=%d", r.file, len(r.clients))
 	if err := os.WriteFile(r.file, data, 0644); err != nil {
-		log.Printf("保存注册表失败: %v", err)
+		alog.Error(alog.CatAuth, "保存注册表失败 error=%s", err)
 	}
 }
 
@@ -220,12 +234,18 @@ func loadCA(caCertPath, caKeyPath string) error {
 	}
 
 	certBlock, _ := pem.Decode(certData)
+	if certBlock == nil {
+		return fmt.Errorf("invalid CA certificate PEM: %s", caCertPath)
+	}
 	caCert, err = x509.ParseCertificate(certBlock.Bytes)
 	if err != nil {
 		return err
 	}
 
 	keyBlock, _ := pem.Decode(keyData)
+	if keyBlock == nil {
+		return fmt.Errorf("invalid CA key PEM: %s", caKeyPath)
+	}
 	caKey, err = x509.ParseECPrivateKey(keyBlock.Bytes)
 	if err != nil {
 		return err
@@ -237,10 +257,11 @@ func loadCA(caCertPath, caKeyPath string) error {
 // generateCA 生成新的 CA 证书和私钥并保存到文件
 func generateCA(caCertPath, caKeyPath string) error {
 	// 生成 ECC P-256 私钥
-	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return err
 	}
+	caKey = key
 
 	// 创建 CA 证书模板
 	caTemplate := x509.Certificate{

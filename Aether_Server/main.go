@@ -7,6 +7,7 @@ import (
 	"Aether/Aether_Server/register"
 	"Aether/Aether_Server/storage"
 	"Aether/common/config"
+	alog "Aether/common/log"
 	"Aether/common/model"
 	"crypto/rand"
 	"crypto/tls"
@@ -16,10 +17,13 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -119,7 +123,7 @@ func restoreClientProxies(cfg *config.ServerConfig, clientMgr *manager.ClientMan
 			return
 		}
 
-		log.Printf("客户端 %s 已连接，恢复 %d 个代理配置", clientID, len(proxies))
+		alog.Info(alog.CatClient, "客户端已连接，恢复代理配置", "clientID", clientID, "count", len(proxies))
 		table, ok := clientMgr.Get(clientID)
 		if !ok {
 			return
@@ -143,7 +147,7 @@ func restoreClientProxies(cfg *config.ServerConfig, clientMgr *manager.ClientMan
 			}
 
 			if err := conn.WriteJSON(&cmd); err != nil {
-				log.Printf("恢复代理失败 %s:%d: %v", clientID, p.RemotePort, err)
+				alog.Error(alog.CatProxy, "恢复代理失败", "clientID", clientID, "remotePort", p.RemotePort, "error", err)
 				continue
 			}
 
@@ -164,15 +168,12 @@ func restoreClientProxies(cfg *config.ServerConfig, clientMgr *manager.ClientMan
 				go h.StartTCPProxy(p.RemotePort, p.BindAddr, table, token)
 			}
 
-			log.Printf("  已恢复: %s %d -> %s:%d", p.Protocol, p.RemotePort, p.LocalIP, p.LocalPort)
+			alog.Info(alog.CatProxy, "已恢复代理", "protocol", p.Protocol, "remotePort", p.RemotePort, "localIP", p.LocalIP, "localPort", p.LocalPort)
 		}
 	}
 }
 
 func main() {
-	middleware.CleanupExpiredRegistrations()
-	middleware.InitJWTSecret()
-
 	// 定义命令行参数
 	configPath := flag.String("config", "config.json", "path to config file")
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -187,22 +188,35 @@ func main() {
 	// 加载配置文件
 	cfg, err := config.LoadServer(*configPath)
 	if err != nil {
-		log.Fatalf("load config: %v", err)
+		alog.Fatal(alog.CatConfig, "加载配置失败", "error", err)
 	}
+
+	// 初始化日志文件
+	if cfg.LogPath != "" {
+		if err := alog.SetFile(cfg.LogPath); err != nil {
+			alog.Fatal(alog.CatConfig, "初始化日志文件失败", "error", err, "path", cfg.LogPath)
+		}
+		alog.Info(alog.CatConfig, "日志文件已启用", "path", cfg.LogPath)
+	}
+
+	// 初始化中间件
+	middleware.Init(cfg.DataDir)
+	middleware.CleanupExpiredRegistrations()
+	middleware.InitJWTSecret()
 
 	// 初始化持久化存储
 	store, err := storage.New(cfg.Storage)
 	if err != nil {
-		log.Fatalf("init storage: %v", err)
+		alog.Fatal(alog.CatConfig, "初始化存储失败", "error", err)
 	}
 
 	// 获取公网 IP
 	publicIP := cfg.PublicIP
 	if publicIP == "" {
-		log.Printf("正在获取公网 IP...")
+		alog.Info(alog.CatSystem, "正在获取公网IP")
 		publicIP = getPublicIP()
 	}
-	log.Printf("公网 IP: %s", publicIP)
+	alog.Info(alog.CatSystem, "公网IP已确定", "publicIP", publicIP)
 
 	// 初始化客户端管理器
 	clientMgr := manager.NewClientManager(manager.Config{
@@ -211,14 +225,25 @@ func main() {
 	})
 
 	// 初始化 CA
-	err = register.InitCA("./data/ca.crt", "./data/ca.key")
+	caCertPath := filepath.Join(cfg.DataDir, "ca.crt")
+	caKeyPath := filepath.Join(cfg.DataDir, "ca.key")
+	err = register.InitCA(caCertPath, caKeyPath)
 	if err != nil {
-		log.Fatalf("init CA: %v", err)
+		alog.Fatal(alog.CatAuth, "初始化CA失败", "error", err)
 	}
-	log.Println("CA 初始化成功")
+	alog.Info(alog.CatAuth, "CA初始化成功")
 
 	// 初始化注册表
-	registry := register.NewRegistry("./data/registry.json")
+	registryPath := filepath.Join(cfg.DataDir, "registry.json")
+	registry := register.NewRegistry(registryPath)
+
+	// 设置客户端删除回调，断开已连接的客户端
+	registry.SetOnClientDelete(func(clientID string) {
+		if table, ok := clientMgr.Get(clientID); ok {
+			alog.Warn(alog.CatAuth, "客户端证书被吊销，断开连接", "clientID", clientID)
+			table.Conn().Close()
+		}
+	})
 
 	registerHandler := handler.NewRegisterHandler(cfg, registry)
 
@@ -279,6 +304,8 @@ func main() {
 		api.POST("/relay/connect", relayHandler.CreateRelay)         // 创建中继连接
 		api.GET("/relay/sessions", relayHandler.ListSessions)        // 列出中继会话
 		api.DELETE("/relay/sessions/:id", relayHandler.CloseSession) // 关闭中继会话
+		api.POST("/update", apiHandler.HandleUpdateServer)              // 更新服务端二进制并重启
+		api.POST("/clients/:id/update", apiHandler.HandleClientUpdate) // 更新指定客户端
 	}
 
 	// WebSocket 端点
@@ -291,26 +318,26 @@ func main() {
 	if cfg.Server.TunnelPort > 0 {
 		tunnelListener, err := handler.NewTunnelListener(cfg.Server.TunnelPort, clientMgr)
 		if err != nil {
-			log.Fatalf("init tunnel listener: %v", err)
+			alog.Fatal(alog.CatTunnel, "初始化隧道监听器失败", "error", err)
 		}
 		defer tunnelListener.Close()
 		go tunnelListener.Start()
-		log.Printf("隧道监听器已启动，端口 :%d", cfg.Server.TunnelPort)
+		alog.Info(alog.CatTunnel, "隧道监听器已启动", "port", cfg.Server.TunnelPort)
 	}
 
 	// 打印已保存的代理配置
 	proxies := store.GetAll()
 	if len(proxies) > 0 {
-		log.Printf("已加载 %d 个代理配置，等待客户端连接后自动恢复", len(proxies))
+		alog.Info(alog.CatProxy, "已加载代理配置，等待客户端连接后自动恢复", "count", len(proxies))
 		for _, p := range proxies {
-			log.Printf("  - %s: %s %d -> %s:%d", p.ClientID, p.Protocol, p.RemotePort, p.LocalIP, p.LocalPort)
+			alog.Info(alog.CatProxy, "代理配置详情", "clientID", p.ClientID, "protocol", p.Protocol, "remotePort", p.RemotePort, "localIP", p.LocalIP, "localPort", p.LocalPort)
 		}
 	}
 
 	// 启动 HTTP/HTTPS 服务
 	caCert, _ := register.GetCA()
 	if caCert == nil {
-		log.Fatal("CA certificate not loaded")
+		alog.Fatal(alog.CatAuth, "CA证书未加载")
 	}
 
 	caCertPool := x509.NewCertPool()
@@ -327,10 +354,31 @@ func main() {
 	}
 
 	if cfg.TLS.Enabled {
-		log.Printf("正在启动 HTTPS/WSS 服务器（mTLS），地址 %s", server.Addr)
-		log.Fatal(server.ListenAndServeTLS(cfg.TLS.CertFile, cfg.TLS.KeyFile))
+		alog.Info(alog.CatServer, "正在启动HTTPS/WSS服务器（mTLS）", "addr", server.Addr)
+		go func() {
+			if err := server.ListenAndServeTLS(cfg.TLS.CertFile, cfg.TLS.KeyFile); err != nil && err != http.ErrServerClosed {
+				alog.Fatal(alog.CatServer, "服务器错误", "error", err)
+			}
+		}()
 	} else {
-		log.Printf("正在启动 HTTP/WS 服务器，地址 %s", server.Addr)
-		log.Fatal(server.ListenAndServe())
+		alog.Info(alog.CatServer, "正在启动HTTP/WS服务器", "addr", server.Addr)
+		go func() {
+			if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				alog.Fatal(alog.CatServer, "服务器错误", "error", err)
+			}
+		}()
 	}
+
+	// 等待退出信号，优雅关闭
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	sig := <-sigCh
+	alog.Info(alog.CatServer, "收到信号，正在优雅关闭", "signal", sig)
+
+	// 关闭 HTTP 服务器
+	server.Close()
+
+	// 关闭隧道监听器（defer 会执行）
+	alog.Info(alog.CatServer, "服务已停止")
+	alog.Flush()
 }

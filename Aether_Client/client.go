@@ -1,6 +1,7 @@
 package main
 
 import (
+	alog "Aether/common/log"
 	"Aether/Aether_Client/conn"
 	"Aether/Aether_Client/handler"
 	"Aether/common/model"
@@ -13,7 +14,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -66,41 +66,41 @@ func fileExists(path string) bool {
 func (c *Client) Run() {
 	// 检查证书文件是否存在，如果不存在则生成密钥并提交申请
 	if !fileExists(c.certPath) || !fileExists(c.privateKeyPath) {
-		log.Println("证书或私钥不存在，开始注册...")
+		alog.Info(alog.CatAuth, "证书或私钥不存在，开始注册")
 		
 		// 生成密钥对
 		if err := generateKeyPair(c.privateKeyPath, c.publicKeyPath); err != nil {
-			log.Fatalf("生成密钥对失败: %v", err)
+			alog.Fatal(alog.CatAuth, "生成密钥对失败", "error", err)
 		}
-		log.Println("密钥对已生成")
+		alog.Info(alog.CatAuth, "密钥对已生成")
 		
 		// 先检查是否已签发证书
 		status, certPEM, err := checkApprovalStatus(c.url, c.id, c.token, c.insecure)
 		if err == nil && status == "approved" && certPEM != "" {
 			// 证书已签发，直接保存
 			if err := os.WriteFile(c.certPath, []byte(certPEM), 0600); err != nil {
-				log.Fatalf("保存证书失败: %v", err)
+				alog.Fatal(alog.CatAuth, "保存证书失败", "error", err)
 			}
-			log.Println("证书已存在，直接下载...")
+			alog.Info(alog.CatAuth, "证书已存在，直接下载")
 		} else {
 			// 提交注册申请
 			if err := submitRegistration(c.url, c.id, c.token, c.publicKeyPath, c.insecure); err != nil {
 				// 如果返回 "already exists"，说明已提交申请，等待审核
 				if strings.Contains(err.Error(), "already exists") {
-					log.Println("注册申请已存在，等待管理员审核...")
+					alog.Info(alog.CatAuth, "注册申请已存在，等待管理员审核")
 				} else {
-					log.Fatalf("提交注册申请失败: %v", err)
+					alog.Fatal(alog.CatAuth, "提交注册申请失败", "error", err)
 				}
 			} else {
-				log.Println("注册申请已提交，等待管理员审核...")
+				alog.Info(alog.CatAuth, "注册申请已提交，等待管理员审核")
 			}
 			
 			// 阻塞等待证书签发
 			if err := waitForApprovalAndDownloadCert(c.url, c.id, c.token, c.certPath, c.insecure, c.stopCh); err != nil {
-				log.Fatalf("等待审核失败: %v", err)
+				alog.Fatal(alog.CatAuth, "等待审核失败", "error", err)
 			}
 		}
-		log.Println("证书已签发并下载，继续启动...")
+		alog.Info(alog.CatAuth, "证书已签发并下载，继续启动")
 	}
 
 	for {
@@ -111,7 +111,7 @@ func (c *Client) Run() {
 		}
 
 		if err := c.connectAndServe(); err != nil {
-			log.Printf("connection error: %v", err)
+			alog.Error(alog.CatClient, "connection error", "error", err)
 		}
 
 		select {
@@ -144,7 +144,7 @@ func waitForApprovalAndDownloadCert(serverURL, clientID, token, certPath string,
 			// 查询审核状态
 			status, certPEM, err := checkApprovalStatus(serverURL, clientID, token, insecure)
 			if err != nil {
-				log.Printf("查询状态失败: %v，继续等待...", err)
+				alog.Warn(alog.CatAuth, "查询状态失败，继续等待", "error", err)
 				continue
 			}
 
@@ -156,7 +156,7 @@ func waitForApprovalAndDownloadCert(serverURL, clientID, token, certPath string,
 				return nil
 			}
 
-			log.Println("等待管理员审核...")
+			alog.Info(alog.CatAuth, "等待管理员审核")
 		}
 	}
 }
@@ -230,7 +230,7 @@ func (c *Client) Stop() {
 
 // connectAndServe 连接服务器，注册客户端，然后运行消息泵直到连接终止。
 func (c *Client) connectAndServe() error {
-	log.Printf("connecting to %s", c.url)
+	alog.Info(alog.CatClient, "connecting", "url", c.url)
 
 	dialer := &websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
@@ -329,7 +329,7 @@ func (c *Client) registerRaw(wsConn *websocket.Conn) error {
 			return fmt.Errorf("unmarshal registered data: %w", err)
 		}
 	}
-	log.Printf("registered: client_id=%s, server_host=%s", regData.ClientID, regData.ServerHost)
+	alog.Info(alog.CatClient, "registered", "clientID", regData.ClientID, "serverHost", regData.ServerHost)
 	return nil
 }
 

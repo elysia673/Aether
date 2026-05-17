@@ -8,3 +8,4 @@ Aether_Server/register/register_test.go
 common/config/client_test.go
 .idea/
 do*
+*.sh

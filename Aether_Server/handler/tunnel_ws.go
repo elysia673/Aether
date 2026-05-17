@@ -2,13 +2,13 @@ package handler
 
 import (
 	"Aether/Aether_Server/manager"
+	alog "Aether/common/log"
 	"Aether/common/model"
 	"Aether/common/mux"
 	"Aether/common/wsconn"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net"
 
 	"github.com/gin-gonic/gin"
@@ -17,27 +17,27 @@ import (
 func (h *WSHandler) HandleTunnelWS(c *gin.Context) {
 	conn, err := newUpgrader(h.domain).Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		log.Printf("隧道 WebSocket 升级错误: %v", err)
+		alog.Error(alog.CatTunnel, "websocket upgrade error", "error", err)
 		return
 	}
 
 	_, msg, err := conn.ReadMessage()
 	if err != nil {
-		log.Printf("隧道认证读取错误: %v", err)
+		alog.Error(alog.CatAuth, "tunnel auth read error", "error", err)
 		conn.Close()
 		return
 	}
 
 	var auth model.TunnelAuthMsg
 	if err := json.Unmarshal(msg, &auth); err != nil {
-		log.Printf("隧道认证 JSON 错误: %v", err)
+		alog.Error(alog.CatAuth, "tunnel auth json error", "error", err)
 		conn.WriteJSON(map[string]string{"type": "tunnel_error", "data": "invalid auth"})
 		conn.Close()
 		return
 	}
 
 	if auth.Type != "tunnel_auth" {
-		log.Printf("隧道认证类型异常: %s", auth.Type)
+		alog.Warn(alog.CatAuth, "tunnel auth unexpected type", "type", auth.Type)
 		conn.WriteJSON(map[string]string{"type": "tunnel_error", "data": "unexpected message type"})
 		conn.Close()
 		return
@@ -45,7 +45,7 @@ func (h *WSHandler) HandleTunnelWS(c *gin.Context) {
 
 	table, key, err := h.clientMgr.FindTableByWSToken(auth.Data.Token)
 	if err != nil {
-		log.Printf("隧道令牌无效: %v", err)
+		alog.Error(alog.CatAuth, "tunnel token invalid", "error", err)
 		conn.WriteJSON(map[string]string{"type": "tunnel_error", "data": "invalid token"})
 		conn.Close()
 		return
@@ -60,18 +60,18 @@ func (h *WSHandler) HandleTunnelWS(c *gin.Context) {
 		Data: model.TunnelReadyData{Status: "ok"},
 	}
 	if err := conn.WriteJSON(ready); err != nil {
-		log.Printf("隧道就绪写入错误: %v", err)
+		alog.Error(alog.CatTunnel, "tunnel ready write error", "error", err)
 		mx.Close()
 		return
 	}
 
 	table.PutMultiplexer(key, mx)
-	log.Printf("隧道多路复用器已创建，key=%s，通过 WebSocket", key)
+	alog.Info(alog.CatMux, "tunnel multiplexer created via websocket", "key", key)
 
 	<-mx.Done()
 	table.RemoveMux(key, mx)
 	table.RemoveWSToken(auth.Data.Token)
-	log.Printf("隧道多路复用器已关闭，key=%s", key)
+	alog.Info(alog.CatMux, "tunnel multiplexer closed", "key", key)
 }
 
 // StartWSProxy 启动 WebSocket 代理监听
@@ -84,7 +84,7 @@ func (h *APIHandler) StartWSProxy(port int, bindAddr string, table *manager.Clie
 	}
 	ln, err := net.Listen("tcp", net.JoinHostPort(bindAddr, fmt.Sprintf("%d", port)))
 	if err != nil {
-		log.Printf("WebSocket 代理监听错误: %v", err)
+		alog.Error(alog.CatProxy, "websocket proxy listen error", "error", err, "port", port)
 		return
 	}
 	defer ln.Close()
@@ -106,7 +106,7 @@ func (h *APIHandler) StartWSProxy(port int, bindAddr string, table *manager.Clie
 		table.RemoveWSToken(token)
 	}()
 
-	log.Printf("WebSocket 代理已监听端口 :%d，客户端 %s", port, clientID)
+	alog.Info(alog.CatProxy, "websocket proxy listening", "port", port, "client_id", clientID)
 
 	for {
 		conn, err := ln.Accept()
@@ -123,29 +123,35 @@ func (h *APIHandler) StartWSProxy(port int, bindAddr string, table *manager.Clie
 func handleWSConnection(conn net.Conn, key string, table *manager.ClientTable) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("handleWSConnection panic: %v", r)
+			alog.Error(alog.CatProxy, "handleWSConnection panic", "error", r)
 		}
 	}()
 
 	remoteAddr := conn.RemoteAddr().String()
-	log.Printf("WebSocket 代理公网连接来自 %s，key=%s", remoteAddr, key)
+	alog.Info(alog.CatProxy, "websocket proxy public connection", "remote", remoteAddr, "key", key)
 
 	mx, err := table.GetMultiplexer(key)
 	if err != nil {
-		log.Printf("没有可用的多路复用器，key=%s: %v", key, err)
+		alog.Error(alog.CatMux, "no multiplexer available", "key", key, "error", err)
 		conn.Close()
 		return
 	}
 
-	channel, err := mx.CreateChannel()
+	port := table.GetProxyPort(key)
+	if port == 0 {
+		alog.Error(alog.CatProxy, "cannot get port", "key", key)
+		conn.Close()
+		return
+	}
+
+	channel, err := mx.OpenChannel(uint16(port))
 	if err != nil {
-		log.Printf("创建通道失败，key=%s: %v", key, err)
+		alog.Error(alog.CatMux, "create channel failed", "key", key, "error", err)
 		conn.Close()
 		return
 	}
 
-	channel.RemoteAddr = conn.RemoteAddr()
-	log.Printf("通道 %d 已创建，公网连接来自 %s", channel.ID, remoteAddr)
+	alog.Info(alog.CatMux, "channel opened", "port", channel.Port, "remote", remoteAddr)
 
 	go handleChannel(conn, channel, key)
 }

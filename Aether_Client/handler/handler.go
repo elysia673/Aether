@@ -2,20 +2,28 @@
 package handler
 
 import (
+	alog "Aether/common/log"
 	"Aether/common/model"
 	"Aether/common/mux"
 	"Aether/common/proto"
 	"Aether/common/wsconn"
 	"context"
+	"crypto/md5"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -45,6 +53,13 @@ type Handler struct {
 	tunnelMu   sync.Mutex
 	tunnelCtxs map[string]context.CancelFunc
 	relay      *relayManager
+
+	// 更新状态
+	updateMu      sync.Mutex
+	updateData    []byte
+	updateMD5     string
+	updateSize    int
+	updateChunksN int
 }
 
 // New 创建新的 Handler。
@@ -81,7 +96,7 @@ func (h *Handler) Stop() {
 func (h *Handler) Handle(msg *model.WSMessage) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("PANIC in handler.Handle: %v", r)
+			alog.Error(alog.CatSystem, "PANIC in handler.Handle", "error", r)
 		}
 	}()
 	switch msg.Type {
@@ -97,6 +112,12 @@ func (h *Handler) Handle(msg *model.WSMessage) {
 		if h.relay != nil {
 			h.relay.handleRelayClosed(msg.Data)
 		}
+	case "update_start":
+		h.handleUpdateStart(msg.Data)
+	case "update_chunk":
+		h.handleUpdateChunk(msg.Data)
+	case "update_end":
+		h.handleUpdateEnd()
 	}
 }
 
@@ -115,20 +136,178 @@ func (h *Handler) stopTunnel(key string) {
 	h.tunnelMu.Unlock()
 }
 
+func (h *Handler) handleUpdateStart(data interface{}) {
+	m, ok := data.(map[string]interface{})
+	if !ok {
+		alog.Warn(alog.CatUpdate, "update_start: invalid data")
+		return
+	}
+
+	h.updateMu.Lock()
+	defer h.updateMu.Unlock()
+
+	md5Val, _ := m["md5"].(string)
+	sizeVal, _ := m["size"].(float64)
+	chunksVal, _ := m["chunks"].(float64)
+
+	h.updateMD5 = md5Val
+	h.updateSize = int(sizeVal)
+	h.updateChunksN = int(chunksVal)
+	h.updateData = make([]byte, 0, h.updateSize)
+
+	alog.Info(alog.CatUpdate, "收到更新开始", "md5", h.updateMD5, "size", h.updateSize, "chunks", h.updateChunksN)
+}
+
+func (h *Handler) handleUpdateChunk(data interface{}) {
+	m, ok := data.(map[string]interface{})
+	if !ok {
+		alog.Warn(alog.CatUpdate, "update_chunk: invalid data")
+		return
+	}
+
+	dataStr, _ := m["data"].(string)
+	chunk, err := base64.StdEncoding.DecodeString(dataStr)
+	if err != nil {
+		alog.Error(alog.CatUpdate, "update_chunk: decode error", "error", err)
+		return
+	}
+
+	h.updateMu.Lock()
+	if h.updateSize > 0 && len(h.updateData)+len(chunk) > h.updateSize {
+		h.updateMu.Unlock()
+		alog.Warn(alog.CatUpdate, "update_chunk: data exceeds expected size, ignoring")
+		return
+	}
+	h.updateData = append(h.updateData, chunk...)
+	h.updateMu.Unlock()
+}
+
+func (h *Handler) handleUpdateEnd() {
+	h.updateMu.Lock()
+
+	if len(h.updateData) == 0 {
+		h.updateMu.Unlock()
+		alog.Warn(alog.CatUpdate, "update_end: no data received")
+		return
+	}
+
+	// 校验 MD5
+	hash := md5.Sum(h.updateData)
+	actualMD5 := hex.EncodeToString(hash[:])
+	if h.updateMD5 != "" && actualMD5 != h.updateMD5 {
+		alog.Error(alog.CatUpdate, "更新失败: MD5 不匹配", "expected", h.updateMD5, "actual", actualMD5)
+		h.updateData = nil
+		h.updateMu.Unlock()
+		return
+	}
+
+	data := make([]byte, len(h.updateData))
+	copy(data, h.updateData)
+	h.updateData = nil
+	h.updateMu.Unlock()
+
+	alog.Info(alog.CatUpdate, "更新数据接收完成，准备替换", "md5", actualMD5, "size", len(data))
+
+	// 获取当前可执行文件路径
+	execPath, err := os.Executable()
+	if err != nil {
+		alog.Error(alog.CatUpdate, "更新失败: 获取路径", "error", err)
+		return
+	}
+
+	// 写入临时文件
+	tmpPath := execPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0755); err != nil {
+		alog.Error(alog.CatUpdate, "更新失败: 写入临时文件", "error", err)
+		return
+	}
+
+	// 跨平台安全重启：创建重启脚本
+	if err := h.createRestartScript(execPath, tmpPath); err != nil {
+		alog.Error(alog.CatUpdate, "更新失败: 创建重启脚本", "error", err)
+		os.Remove(tmpPath)
+		return
+	}
+
+	alog.Info(alog.CatUpdate, "更新成功，正在重启")
+	os.Exit(0)
+}
+
+// createRestartScript 创建跨平台重启脚本
+func (h *Handler) createRestartScript(execPath, tmpPath string) error {
+	execDir := filepath.Dir(execPath)
+
+	var scriptPath, scriptContent string
+
+	switch runtime.GOOS {
+	case "windows":
+		scriptPath = filepath.Join(execDir, "aether_restart.bat")
+		scriptContent = fmt.Sprintf(`@echo off
+timeout /t 2 /nobreak >nul
+move /y "%s" "%s"
+start "" "%s"
+del "%%~f0"
+`, filepath.Clean(tmpPath), filepath.Clean(execPath), filepath.Clean(execPath))
+	default: // linux, darwin
+		scriptPath = filepath.Join(execDir, "aether_restart.sh")
+		scriptContent = fmt.Sprintf(`#!/bin/sh
+sleep 2
+mv %s %s
+chmod +x %s
+exec %s &
+rm -- "$0"
+`, shellQuote(tmpPath), shellQuote(execPath), shellQuote(execPath), shellQuote(execPath))
+	}
+
+	if err := os.WriteFile(scriptPath, []byte(scriptContent), 0755); err != nil {
+		return err
+	}
+
+	// 启动重启脚本
+	switch runtime.GOOS {
+	case "windows":
+		go func() {
+			cmd := exec.Command("cmd", "/c", "start", "/b", scriptPath)
+			cmd.Start()
+		}()
+	default:
+		go func() {
+			cmd := exec.Command("/bin/sh", scriptPath)
+			cmd.Start()
+		}()
+	}
+
+	return nil
+}
+
+// shellQuote 对路径进行 shell 安全引用
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
 func (h *Handler) handleProxyClosed(data interface{}) {
 	closed, err := unmarshalData[model.ProxyClosedData](data)
 	if err != nil {
-		log.Printf("proxy_closed unmarshal error: %v", err)
+		alog.Error(alog.CatProxy, "proxy_closed unmarshal error", "error", err)
 		return
 	}
-	log.Printf("proxy closed by server: %s, stopping tunnel", closed.Key)
+	alog.Info(alog.CatProxy, "proxy closed by server, stopping tunnel", "key", closed.Key)
 	h.stopTunnel(closed.Key)
+
+	// 回复确认
+	if h.sender != nil {
+		ack := model.WSMessage{
+			Type: "proxy_close_ack",
+			Data: closed.Key,
+		}
+		h.sender.WriteJSON(&ack)
+	}
 }
 
 func (h *Handler) handleProxy(data interface{}) {
 	cmd, err := unmarshalData[model.CommandData](data)
 	if err != nil {
-		log.Printf("proxy message unmarshal error: %v", err)
+		alog.Error(alog.CatProxy, "proxy message unmarshal error", "error", err)
 		return
 	}
 
@@ -136,8 +315,10 @@ func (h *Handler) handleProxy(data interface{}) {
 		cmd.LocalIP = "127.0.0.1"
 	}
 
-	log.Printf("proxy command: serverHost=%s, remotePort=%d, localPort=%d, localIP=%s, token=%s, protocol=%s, tunnelPort=%d",
-		cmd.ServerHost, cmd.RemotePort, cmd.LocalPort, cmd.LocalIP, cmd.Token, cmd.Protocol, cmd.TunnelPort)
+	alog.Info(alog.CatProxy, "proxy command",
+		"serverHost", cmd.ServerHost, "remotePort", cmd.RemotePort,
+		"localPort", cmd.LocalPort, "localIP", cmd.LocalIP,
+		"protocol", cmd.Protocol, "tunnelPort", cmd.TunnelPort)
 
 	key := fmt.Sprintf("%s-%d", h.cfg.ClientID, cmd.RemotePort)
 
@@ -147,7 +328,7 @@ func (h *Handler) handleProxy(data interface{}) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("PANIC in WS tunnel: %v", r)
+					alog.Error(alog.CatTunnel, "PANIC in WS tunnel", "error", r)
 				}
 				h.stopTunnel(key)
 			}()
@@ -162,7 +343,7 @@ func (h *Handler) handleProxy(data interface{}) {
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("PANIC in UDP tunnel: %v", r)
+					alog.Error(alog.CatTunnel, "PANIC in UDP tunnel", "error", r)
 				}
 				h.stopTunnel(key)
 			}()
@@ -178,7 +359,7 @@ func (h *Handler) handleProxy(data interface{}) {
 		go func(id int) {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("PANIC in tunnel goroutine %d: %v", id, r)
+					alog.Error(alog.CatTunnel, "PANIC in tunnel goroutine", "id", id, "error", r)
 				}
 				if id == 0 {
 					h.stopTunnel(key)
@@ -190,8 +371,10 @@ func (h *Handler) handleProxy(data interface{}) {
 }
 
 func (h *Handler) runTunnel(ctx context.Context, serverHost string, remotePort int, token string, localPort int, localIP string, tunnelPort int) {
-	log.Printf("Starting tunnel with multiplexing: remote=%s:%d, local=%s:%d, tunnelPort=%d",
-		serverHost, remotePort, localIP, localPort, tunnelPort)
+	alog.Info(alog.CatTunnel, "Starting tunnel with multiplexing",
+		"remote", fmt.Sprintf("%s:%d", serverHost, remotePort),
+		"local", fmt.Sprintf("%s:%d", localIP, localPort),
+		"tunnelPort", tunnelPort)
 
 	for {
 		select {
@@ -206,53 +389,54 @@ func (h *Handler) runTunnel(ctx context.Context, serverHost string, remotePort i
 		}
 
 		tunnelAddr := net.JoinHostPort(serverHost, fmt.Sprintf("%d", connectPort))
-		log.Printf("Connecting tunnel to %s", tunnelAddr)
+		alog.Info(alog.CatTunnel, "Connecting tunnel", "addr", tunnelAddr)
 
 		startDial := time.Now()
 		conn, err := net.DialTimeout("tcp", tunnelAddr, 10*time.Second)
 		dialElapsed := time.Since(startDial)
 		if err != nil {
-			log.Printf("Tunnel dial failed after %v: %v", dialElapsed, err)
+			alog.Error(alog.CatTunnel, "Tunnel dial failed", "elapsed", dialElapsed, "error", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
 
-		log.Printf("Connected to tunnel from %s to %s (dial took %v)", conn.LocalAddr(), conn.RemoteAddr(), dialElapsed)
+		alog.Info(alog.CatTunnel, "Connected to tunnel",
+			"local", conn.LocalAddr(), "remote", conn.RemoteAddr(), "dialElapsed", dialElapsed)
 
 		start := time.Now()
 		if err := proto.WriteTunnelAuth(conn, token); err != nil {
-			log.Printf("Failed to send tunnel auth: %v", err)
+			alog.Error(alog.CatTunnel, "Failed to send tunnel auth", "error", err)
 			conn.Close()
 			time.Sleep(1 * time.Second)
 			continue
 		}
-		log.Printf("Tunnel auth sent in %v, waiting for acknowledgement", time.Since(start))
+		alog.Info(alog.CatTunnel, "Tunnel auth sent, waiting for acknowledgement", "elapsed", time.Since(start))
 
 		ack := make([]byte, 1)
 		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 		ackN, err := io.ReadFull(conn, ack)
 		conn.SetReadDeadline(time.Time{})
 		if err != nil {
-			log.Printf("Acknowledgement read failed: %v (read %d bytes)", err, ackN)
+			alog.Error(alog.CatTunnel, "Acknowledgement read failed", "error", err, "bytesRead", ackN)
 			conn.Close()
 			time.Sleep(1 * time.Second)
 			continue
 		}
 		if ack[0] != 0x01 {
-			log.Printf("Invalid acknowledgement byte: 0x%02x", ack[0])
+			alog.Error(alog.CatTunnel, "Invalid acknowledgement byte", "byte", fmt.Sprintf("0x%02x", ack[0]))
 			conn.Close()
 			time.Sleep(1 * time.Second)
 			continue
 		}
 
-		log.Printf("Tunnel authenticated with ack=0x%02x, creating multiplexer", ack[0])
+		alog.Info(alog.CatTunnel, "Tunnel authenticated, creating multiplexer", "ack", fmt.Sprintf("0x%02x", ack[0]))
 
 		mx := mux.New(conn)
 		mx.LocalTarget = net.JoinHostPort(localIP, fmt.Sprintf("%d", localPort))
 		mx.OnNewChannel = mx.HandleChannel
 
 		<-mx.Done()
-		log.Printf("Multiplexer closed, reconnecting...")
+		alog.Info(alog.CatTunnel, "Multiplexer closed, reconnecting")
 
 		time.Sleep(1 * time.Second)
 	}
@@ -261,7 +445,9 @@ func (h *Handler) runTunnel(ctx context.Context, serverHost string, remotePort i
 // runTunnelUDP 运行 UDP 隧道
 // 通过 TCP 连接到服务器的 UDP 隧道端口，然后转发 UDP 数据
 func (h *Handler) runTunnelUDP(ctx context.Context, serverHost string, remotePort int, token string, localPort int, localIP string) {
-	log.Printf("启动 UDP 隧道: 远程=%s:%d, 本地=%s:%d", serverHost, remotePort, localIP, localPort)
+	alog.Info(alog.CatTunnel, "启动 UDP 隧道",
+		"remote", fmt.Sprintf("%s:%d", serverHost, remotePort),
+		"local", fmt.Sprintf("%s:%d", localIP, localPort))
 
 	for {
 		select {
@@ -271,20 +457,21 @@ func (h *Handler) runTunnelUDP(ctx context.Context, serverHost string, remotePor
 		}
 
 		tunnelAddr := net.JoinHostPort(serverHost, fmt.Sprintf("%d", remotePort))
-		log.Printf("连接 UDP 隧道到 %s", tunnelAddr)
+		alog.Info(alog.CatTunnel, "连接 UDP 隧道", "addr", tunnelAddr)
 
 		conn, err := net.DialTimeout("tcp", tunnelAddr, 10*time.Second)
 		if err != nil {
-			log.Printf("UDP 隧道连接失败: %v", err)
+			alog.Error(alog.CatTunnel, "UDP 隧道连接失败", "error", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
 
-		log.Printf("已连接到 UDP 隧道 %s -> %s", conn.LocalAddr(), conn.RemoteAddr())
+		alog.Info(alog.CatTunnel, "已连接到 UDP 隧道",
+			"local", conn.LocalAddr(), "remote", conn.RemoteAddr())
 
 		// 发送认证标记 "TUNNEL\n"
 		if _, err := conn.Write([]byte("TUNNEL\n")); err != nil {
-			log.Printf("UDP 隧道认证标记发送失败: %v", err)
+			alog.Error(alog.CatTunnel, "UDP 隧道认证标记发送失败", "error", err)
 			conn.Close()
 			time.Sleep(1 * time.Second)
 			continue
@@ -294,13 +481,13 @@ func (h *Handler) runTunnelUDP(ctx context.Context, serverHost string, remotePor
 		tokenBytes := []byte(token)
 		tokenLen := uint16(len(tokenBytes))
 		if err := binary.Write(conn, binary.BigEndian, tokenLen); err != nil {
-			log.Printf("UDP 隧道 token 长度发送失败: %v", err)
+			alog.Error(alog.CatTunnel, "UDP 隧道 token 长度发送失败", "error", err)
 			conn.Close()
 			time.Sleep(1 * time.Second)
 			continue
 		}
 		if _, err := conn.Write(tokenBytes); err != nil {
-			log.Printf("UDP 隧道 token 发送失败: %v", err)
+			alog.Error(alog.CatTunnel, "UDP 隧道 token 发送失败", "error", err)
 			conn.Close()
 			time.Sleep(1 * time.Second)
 			continue
@@ -310,7 +497,7 @@ func (h *Handler) runTunnelUDP(ctx context.Context, serverHost string, remotePor
 		ack := make([]byte, 1)
 		conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 		if _, err := io.ReadFull(conn, ack); err != nil {
-			log.Printf("UDP 隧道确认读取失败: %v", err)
+			alog.Error(alog.CatTunnel, "UDP 隧道确认读取失败", "error", err)
 			conn.Close()
 			time.Sleep(1 * time.Second)
 			continue
@@ -318,18 +505,18 @@ func (h *Handler) runTunnelUDP(ctx context.Context, serverHost string, remotePor
 		conn.SetReadDeadline(time.Time{})
 
 		if ack[0] != 0x01 {
-			log.Printf("UDP 隧道确认无效: 0x%02x", ack[0])
+			alog.Error(alog.CatTunnel, "UDP 隧道确认无效", "byte", fmt.Sprintf("0x%02x", ack[0]))
 			conn.Close()
 			time.Sleep(1 * time.Second)
 			continue
 		}
 
-		log.Printf("UDP 隧道认证成功")
+		alog.Info(alog.CatTunnel, "UDP 隧道认证成功")
 
 		// 启动 UDP 数据转发
 		h.handleUDPTunnel(conn, localIP, localPort)
 
-		log.Printf("UDP 隧道断开，正在重连...")
+		alog.Info(alog.CatTunnel, "UDP 隧道断开，正在重连")
 		time.Sleep(1 * time.Second)
 	}
 }
@@ -341,7 +528,7 @@ func (h *Handler) handleUDPTunnel(conn net.Conn, localIP string, localPort int) 
 	// 连接到本地 UDP 服务
 	localAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(localIP, fmt.Sprintf("%d", localPort)))
 	if err != nil {
-		log.Printf("本地 UDP 地址解析失败: %v", err)
+		alog.Error(alog.CatTunnel, "本地 UDP 地址解析失败", "error", err)
 		return
 	}
 
@@ -350,7 +537,7 @@ func (h *Handler) handleUDPTunnel(conn net.Conn, localIP string, localPort int) 
 	// 这里我们使用一个固定的 UDP 连接来发送
 	localConn, err := net.DialUDP("udp", nil, localAddr)
 	if err != nil {
-		log.Printf("本地 UDP 连接失败: %v", err)
+		alog.Error(alog.CatTunnel, "本地 UDP 连接失败", "error", err)
 		return
 	}
 	defer localConn.Close()
@@ -362,22 +549,29 @@ func (h *Handler) handleUDPTunnel(conn net.Conn, localIP string, localPort int) 
 	}
 	sessions := make(map[uint16]*udpSession)
 	var sessionsMu sync.Mutex
+	done := make(chan struct{})
 
 	// 清理过期会话
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
-		for range ticker.C {
-			sessionsMu.Lock()
-			now := time.Now()
-			for port, sess := range sessions {
-				if now.Sub(sess.lastActive) > 60*time.Second {
-					delete(sessions, port)
+		for {
+			select {
+			case <-ticker.C:
+				sessionsMu.Lock()
+				now := time.Now()
+				for port, sess := range sessions {
+					if now.Sub(sess.lastActive) > 60*time.Second {
+						delete(sessions, port)
+					}
 				}
+				sessionsMu.Unlock()
+			case <-done:
+				return
 			}
-			sessionsMu.Unlock()
 		}
 	}()
+	defer close(done)
 
 	// 从服务器读取 UDP 数据并转发到本地
 	go func() {
@@ -388,24 +582,24 @@ func (h *Handler) handleUDPTunnel(conn net.Conn, localIP string, localPort int) 
 
 			if err := binary.Read(conn, binary.BigEndian, &destPort); err != nil {
 				if err != io.EOF {
-					log.Printf("UDP 隧道读取端口错误: %v", err)
+					alog.Error(alog.CatTunnel, "UDP 隧道读取端口错误", "error", err)
 				}
 				return
 			}
 
 			if err := binary.Read(conn, binary.BigEndian, &dataLen); err != nil {
-				log.Printf("UDP 隧道读取长度错误: %v", err)
+				alog.Error(alog.CatTunnel, "UDP 隧道读取长度错误", "error", err)
 				return
 			}
 
 			if dataLen > 65535 {
-				log.Printf("UDP 数据包过大: %d", dataLen)
+				alog.Error(alog.CatTunnel, "UDP 数据包过大", "size", dataLen)
 				return
 			}
 
 			data := make([]byte, dataLen)
 			if _, err := io.ReadFull(conn, data); err != nil {
-				log.Printf("UDP 隧道读取数据错误: %v", err)
+				alog.Error(alog.CatTunnel, "UDP 隧道读取数据错误", "error", err)
 				return
 			}
 
@@ -418,7 +612,7 @@ func (h *Handler) handleUDPTunnel(conn net.Conn, localIP string, localPort int) 
 
 			// 发送到本地 UDP 服务
 			if _, err := localConn.Write(data); err != nil {
-				log.Printf("本地 UDP 发送错误: %v", err)
+				alog.Error(alog.CatTunnel, "本地 UDP 发送错误", "error", err)
 				continue
 			}
 		}
@@ -429,7 +623,7 @@ func (h *Handler) handleUDPTunnel(conn net.Conn, localIP string, localPort int) 
 	for {
 		n, err := localConn.Read(buf)
 		if err != nil {
-			log.Printf("本地 UDP 读取错误: %v", err)
+			alog.Error(alog.CatTunnel, "本地 UDP 读取错误", "error", err)
 			break
 		}
 
@@ -448,7 +642,7 @@ func (h *Handler) handleUDPTunnel(conn net.Conn, localIP string, localPort int) 
 		copy(packet[4:], buf[:n])
 
 		if _, err := conn.Write(packet); err != nil {
-			log.Printf("UDP 隧道写入错误: %v", err)
+			alog.Error(alog.CatTunnel, "UDP 隧道写入错误", "error", err)
 			break
 		}
 	}
@@ -469,11 +663,11 @@ func (h *Handler) runTunnelWS(ctx context.Context, serverHost string, token stri
 			scheme = "ws"
 		}
 		tunnelURL := fmt.Sprintf("%s://%s:9909/tunnel", scheme, serverHost)
-		log.Printf("Starting WebSocket tunnel: url=%s, local=%s", tunnelURL, localTarget)
+		alog.Info(alog.CatTunnel, "Starting WebSocket tunnel", "url", tunnelURL, "local", localTarget)
 
 		conn, err := h.connectTunnelWS(tunnelURL, token)
 		if err != nil {
-			log.Printf("WebSocket tunnel connect failed: %v, retrying...", err)
+			alog.Error(alog.CatTunnel, "WebSocket tunnel connect failed, retrying", "error", err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
@@ -481,10 +675,10 @@ func (h *Handler) runTunnelWS(ctx context.Context, serverHost string, token stri
 		mx := mux.New(conn)
 		mx.LocalTarget = localTarget
 		mx.OnNewChannel = mx.HandleChannel
-		log.Printf("WebSocket tunnel multiplexer created, localTarget=%s", localTarget)
+		alog.Info(alog.CatTunnel, "WebSocket tunnel multiplexer created", "localTarget", localTarget)
 
 		<-mx.Done()
-		log.Printf("WebSocket tunnel multiplexer closed, reconnecting...")
+		alog.Info(alog.CatTunnel, "WebSocket tunnel multiplexer closed, reconnecting")
 		time.Sleep(1 * time.Second)
 	}
 }
@@ -538,7 +732,7 @@ func (h *Handler) connectTunnelWS(tunnelURL string, token string) (net.Conn, err
 		return nil, fmt.Errorf("tunnel unexpected response type: %s", resp.Type)
 	}
 
-	log.Printf("WebSocket tunnel authenticated and ready")
+	alog.Info(alog.CatTunnel, "WebSocket tunnel authenticated and ready")
 	return wsconn.New(ws), nil
 }
 

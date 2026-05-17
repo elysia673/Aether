@@ -2,13 +2,13 @@ package handler
 
 import (
 	"Aether/Aether_Server/manager"
+	alog "Aether/common/log"
 	"Aether/common/model"
 	"Aether/common/wsconn"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"io"
-	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -166,8 +166,11 @@ func (h *RelayHandler) CreateRelay(c *gin.Context) {
 
 	go h.monitorSession(session)
 
-	log.Printf("中继会话 %s: %s <-> %s, 协议=%s",
-		sessionID, req.SourceClientID, req.TargetClientID, req.Protocol)
+	alog.Info(alog.CatRelay, "relay session created",
+		"session_id", sessionID,
+		"source", req.SourceClientID,
+		"target", req.TargetClientID,
+		"protocol", req.Protocol)
 
 	c.JSON(http.StatusOK, model.Success(map[string]interface{}{
 		"session_id":    sessionID,
@@ -212,7 +215,7 @@ func (h *RelayHandler) HandleRelayWS(c *gin.Context) {
 
 	ws, err := newUpgrader(h.serverHost).Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		log.Printf("中继 WebSocket 升级错误: %v", err)
+		alog.Error(alog.CatRelay, "relay websocket upgrade error", "error", err)
 		return
 	}
 
@@ -222,7 +225,7 @@ func (h *RelayHandler) HandleRelayWS(c *gin.Context) {
 		session.targetConn = ws
 	}
 
-	log.Printf("中继: %s 已连接 (会话=%s)", role, sessionID)
+	alog.Info(alog.CatRelay, "relay connected", "role", role, "session_id", sessionID)
 
 	if session.sourceConn != nil && session.targetConn != nil {
 		go h.bridgeRelay(session)
@@ -238,7 +241,7 @@ func (h *RelayHandler) bridgeRelay(session *relaySessionState) {
 	defer src.Close()
 	defer dst.Close()
 
-	log.Printf("中继: 正在桥接 %s", session.ID)
+	alog.Info(alog.CatRelay, "bridging relay", "session_id", session.ID)
 
 	bufSize := 256 * 1024
 	done := make(chan struct{}, 2)
@@ -254,7 +257,7 @@ func (h *RelayHandler) bridgeRelay(session *relaySessionState) {
 	}()
 
 	<-done
-	log.Printf("中继: 会话 %s 已关闭", session.ID)
+	alog.Info(alog.CatRelay, "relay session closed", "session_id", session.ID)
 }
 
 // monitorSession 监控中继会话超时。
@@ -263,7 +266,7 @@ func (h *RelayHandler) monitorSession(session *relaySessionState) {
 	case <-session.done:
 	case <-time.After(120 * time.Second):
 		if session.sourceConn == nil || session.targetConn == nil {
-			log.Printf("中继会话 %s: 连接超时", session.ID)
+			alog.Warn(alog.CatRelay, "relay connection timeout", "session_id", session.ID)
 			h.cleanupSession(session.ID)
 		}
 	}
@@ -285,7 +288,10 @@ func (h *RelayHandler) HandleClientStatus(msg *model.WSMessage, clientID string)
 		}
 
 		if status.Status == "failed" {
-			log.Printf("中继会话 %s: 客户端 %s 报告失败: %s", status.SessionID, clientID, status.Message)
+			alog.Error(alog.CatRelay, "relay client reported failure",
+				"session_id", status.SessionID,
+				"client_id", clientID,
+				"message", status.Message)
 			session.Error = clientID + ": " + status.Message
 			session.done <- struct{}{}
 			go func() {
@@ -328,7 +334,7 @@ func (h *RelayHandler) cleanupSession(sessionID string) {
 				session.targetConn.Close()
 			}
 		})
-		log.Printf("中继会话 %s 已清理", sessionID)
+		alog.Info(alog.CatRelay, "relay session cleaned up", "session_id", sessionID)
 	}
 }
 

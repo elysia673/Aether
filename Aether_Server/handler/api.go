@@ -7,14 +7,20 @@ import (
 	"Aether/Aether_Server/manager"
 	"Aether/Aether_Server/middleware"
 	"Aether/Aether_Server/storage"
+	alog "Aether/common/log"
 	"Aether/common/config"
 	"Aether/common/model"
+	"crypto/md5"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 )
@@ -205,12 +211,176 @@ func (h *APIHandler) HandleLogin(c *gin.Context) {
 
 	token, err := middleware.GenerateToken(req.APIKey)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, model.Error(500, "failed to generate token: "+err.Error()))
+		c.JSON(http.StatusConflict, model.Error(409, err.Error()))
 		return
 	}
 
 	c.JSON(http.StatusOK, model.Success(LoginResponse{
 		Token:     token,
 		ExpiresIn: 365 * 24 * 3600,
+	}))
+}
+
+// HandleUpdateServer 更新服务端自身
+func (h *APIHandler) HandleUpdateServer(c *gin.Context) {
+	file, _, err := c.Request.FormFile("binary")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Error(400, "missing binary file"))
+		return
+	}
+	defer file.Close()
+
+	expectedMD5 := c.PostForm("md5")
+
+	execPath, err := os.Executable()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, model.Error(500, "get executable path failed"))
+		return
+	}
+
+	tmpPath := execPath + ".tmp"
+	tmpFile, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, model.Error(500, "create temp file failed"))
+		return
+	}
+
+	hash := md5.New()
+	writer := io.MultiWriter(tmpFile, hash)
+
+	if _, err := io.Copy(writer, file); err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		c.JSON(http.StatusInternalServerError, model.Error(500, "write binary failed"))
+		return
+	}
+	tmpFile.Close()
+
+	actualMD5 := hex.EncodeToString(hash.Sum(nil))
+
+	if expectedMD5 != "" && actualMD5 != expectedMD5 {
+		os.Remove(tmpPath)
+		c.JSON(http.StatusBadRequest, model.Error(400, fmt.Sprintf("md5 mismatch: expected %s, got %s", expectedMD5, actualMD5)))
+		return
+	}
+
+	if err := os.Rename(tmpPath, execPath); err != nil {
+		os.Remove(tmpPath)
+		c.JSON(http.StatusInternalServerError, model.Error(500, "replace binary failed"))
+		return
+	}
+
+	c.JSON(http.StatusOK, model.Success(gin.H{
+		"message": "binary updated, restarting...",
+		"md5":     actualMD5,
+	}))
+
+	alog.Info(alog.CatUpdate, "received update, restarting", "md5", actualMD5)
+
+	// 优雅重启：等待响应发完后退出，由 systemd 拉起新进程
+	go func() {
+		time.Sleep(1 * time.Second)
+		alog.Info(alog.CatUpdate, "gracefully exiting, waiting for connections to drain")
+		// 给现有连接 10 秒排空时间
+		time.Sleep(10 * time.Second)
+		os.Exit(0)
+	}()
+}
+
+// HandleClientUpdate 更新指定客户端
+func (h *APIHandler) HandleClientUpdate(c *gin.Context) {
+	clientID := c.Param("id")
+
+	table, ok := h.clientMgr.Get(clientID)
+	if !ok {
+		c.JSON(http.StatusNotFound, model.Error(404, "client not found"))
+		return
+	}
+
+	conn := table.Conn()
+	if conn == nil {
+		c.JSON(http.StatusNotFound, model.Error(404, "client not connected"))
+		return
+	}
+
+	fileHeader, err := c.FormFile("binary")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, model.Error(400, "missing binary file"))
+		return
+	}
+
+	file, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, model.Error(500, "open file failed"))
+		return
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, model.Error(500, "read file failed"))
+		return
+	}
+
+	hash := md5.Sum(data)
+	md5sum := hex.EncodeToString(hash[:])
+
+	totalChunks := (len(data) + 16*1024 - 1) / (16 * 1024)
+
+	// 发送开始消息
+	startMsg := model.WSMessage{
+		Type: "update_start",
+		Data: map[string]interface{}{
+			"platform": "linux",
+			"md5":      md5sum,
+			"size":     len(data),
+			"chunks":   totalChunks,
+		},
+	}
+	if err := conn.WriteJSON(&startMsg); err != nil {
+		c.JSON(http.StatusInternalServerError, model.Error(500, "send update_start failed"))
+		return
+	}
+
+	// 发送数据块
+	chunkSize := 16 * 1024
+	for i := 0; i < totalChunks; i++ {
+		start := i * chunkSize
+		end := start + chunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+
+		chunk := data[start:end]
+		chunkMsg := model.WSMessage{
+			Type: "update_chunk",
+			Data: map[string]interface{}{
+				"index": i,
+				"data":  base64.StdEncoding.EncodeToString(chunk),
+			},
+		}
+		if err := conn.WriteJSON(&chunkMsg); err != nil {
+			c.JSON(http.StatusInternalServerError, model.Error(500, "send chunk failed"))
+			return
+		}
+	}
+
+	// 发送结束消息
+	endMsg := model.WSMessage{
+		Type: "update_end",
+		Data: map[string]interface{}{},
+	}
+	if err := conn.WriteJSON(&endMsg); err != nil {
+		c.JSON(http.StatusInternalServerError, model.Error(500, "send update_end failed"))
+		return
+	}
+
+	c.JSON(http.StatusOK, model.Success(gin.H{
+		"message":  "update sent to client",
+		"client":   clientID,
+		"md5":      md5sum,
+		"size":     len(data),
+		"chunks":   totalChunks,
+		"platform": "linux",
 	}))
 }

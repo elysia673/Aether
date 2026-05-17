@@ -2,13 +2,13 @@ package handler
 
 import (
 	"Aether/Aether_Server/manager"
+	alog "Aether/common/log"
 	"Aether/common/mux"
 	"Aether/common/proto"
 	"bufio"
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net"
 	"sync"
 	"time"
@@ -21,7 +21,7 @@ func (h *APIHandler) StartTCPProxy(port int, bindAddr string, table *manager.Cli
 	}
 	ln, err := net.Listen("tcp", net.JoinHostPort(bindAddr, fmt.Sprintf("%d", port)))
 	if err != nil {
-		log.Printf("监听错误: %v", err)
+		alog.Error(alog.CatProxy, "listen failed", "error", err, "port", port)
 		return
 	}
 	defer ln.Close()
@@ -46,7 +46,7 @@ func (h *APIHandler) StartTCPProxy(port int, bindAddr string, table *manager.Cli
 	}()
 
 	table.SetPending(key)
-	log.Printf("TCP 代理已监听端口 :%d，客户端 %s", port, clientID)
+	alog.Info(alog.CatProxy, "TCP proxy listening", "port", port, "client_id", clientID)
 
 	for {
 		conn, err := ln.Accept()
@@ -64,12 +64,12 @@ func (h *APIHandler) StartTCPProxy(port int, bindAddr string, table *manager.Cli
 func handleTCPConnection(conn net.Conn, key string, token string, table *manager.ClientTable) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("handleTCPConnection panic: %v", r)
+			alog.Error(alog.CatProxy, "handleTCPConnection panic", "error", r)
 		}
 	}()
 
 	remoteAddr := conn.RemoteAddr().String()
-	log.Printf("新的 TCP 连接来自 %s，key=%s", remoteAddr, key)
+	alog.Info(alog.CatProxy, "new TCP connection", "remote", remoteAddr, "key", key)
 
 	br := bufio.NewReader(conn)
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
@@ -79,53 +79,59 @@ func handleTCPConnection(conn net.Conn, key string, token string, table *manager
 		conn.SetReadDeadline(time.Time{})
 
 		if err == nil && receivedToken == token {
-			log.Printf("隧道连接已建立，key=%s，来自 %s，创建多路复用器", key, remoteAddr)
+			alog.Info(alog.CatTunnel, "tunnel connection established, creating multiplexer", "key", key, "remote", remoteAddr)
 
-			mx := mux.New(conn)
+			mx := mux.New(&bufferedConn{reader: br, conn: conn})
 
 			if _, err := conn.Write([]byte{0x01}); err != nil {
-				log.Printf("发送隧道确认失败: %v", err)
+				alog.Error(alog.CatTunnel, "send tunnel ack failed", "error", err)
 				conn.Close()
 				return
 			}
 
 			table.PutMultiplexer(key, mx)
-			log.Printf("多路复用器已创建，key=%s", key)
+			alog.Info(alog.CatMux, "multiplexer created", "key", key)
 
 			<-mx.Done()
 			table.RemoveMux(key, mx)
-			log.Printf("多路复用器已关闭，key=%s", key)
+			alog.Info(alog.CatMux, "multiplexer closed", "key", key)
 			return
 		}
 
 		if err != nil {
-			log.Printf("隧道认证失败，来自 %s: %v", remoteAddr, err)
+			alog.Error(alog.CatAuth, "tunnel auth failed", "remote", remoteAddr, "error", err)
 		} else {
-			log.Printf("令牌不匹配，来自 %s", remoteAddr)
+			alog.Warn(alog.CatAuth, "token mismatch", "remote", remoteAddr)
 		}
 		conn.Close()
 		return
 	}
 
 	conn.SetReadDeadline(time.Time{})
-	log.Printf("公网连接来自 %s，key=%s，获取多路复用器", remoteAddr, key)
+	alog.Info(alog.CatProxy, "public connection, getting multiplexer", "remote", remoteAddr, "key", key)
 
 	mx, err := table.GetMultiplexer(key)
 	if err != nil {
-		log.Printf("没有可用的多路复用器，key=%s: %v", key, err)
+		alog.Error(alog.CatMux, "no multiplexer available", "key", key, "error", err)
 		conn.Close()
 		return
 	}
 
-	channel, err := mx.CreateChannel()
+	port := table.GetProxyPort(key)
+	if port == 0 {
+		alog.Error(alog.CatProxy, "cannot get port", "key", key)
+		conn.Close()
+		return
+	}
+
+	channel, err := mx.OpenChannel(uint16(port))
 	if err != nil {
-		log.Printf("创建通道失败，key=%s: %v", key, err)
+		alog.Error(alog.CatMux, "create channel failed", "key", key, "error", err)
 		conn.Close()
 		return
 	}
 
-	channel.RemoteAddr = conn.RemoteAddr()
-	log.Printf("通道 %d 已创建，公网连接来自 %s", channel.ID, remoteAddr)
+	alog.Info(alog.CatMux, "channel opened", "port", channel.Port, "remote", remoteAddr)
 
 	wrappedConn := &bufferedConn{reader: br, conn: conn}
 	go handleChannel(wrappedConn, channel, key)
@@ -171,7 +177,7 @@ func (bc *bufferedConn) SetWriteDeadline(t time.Time) error {
 func handleChannel(publicConn net.Conn, channel *mux.Channel, key string) {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("PANIC in handleChannel: %v", r)
+			alog.Error(alog.CatMux, "handleChannel panic", "error", r, "port", channel.Port)
 		}
 		publicConn.Close()
 	}()
@@ -179,37 +185,56 @@ func handleChannel(publicConn net.Conn, channel *mux.Channel, key string) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
+	// 用户 → 隧道（优先 splice 零拷贝）
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("PANIC in handleChannel publicRead goroutine: %v", r)
+				alog.Error(alog.CatMux, "handleChannel publicRead panic", "error", r, "port", channel.Port)
 			}
+			publicConn.Close()
 			wg.Done()
 		}()
-		buf := make([]byte, 4096)
+
+		// 尝试 splice
+		if tc, ok := publicConn.(*net.TCPConn); ok && channel.Mux.SpliceAvailable() {
+			if f, err := tc.File(); err == nil {
+				fd := int(f.Fd())
+				defer f.Close()
+				for {
+					if err := channel.Mux.SpliceSend(channel.Port, fd, mux.MaxFrameSize); err != nil {
+						break
+					}
+				}
+				channel.Mux.CloseChannel(channel.Port)
+				return
+			}
+		}
+
+		// 回退：Read→Send
+		buf := make([]byte, mux.MaxFrameSize)
 		for {
 			n, err := publicConn.Read(buf)
 			if err != nil {
 				if err != io.EOF {
-					log.Printf("Channel %d: public read error: %v", channel.ID, err)
+					alog.Error(alog.CatMux, "public read error", "port", channel.Port, "error", err)
 				}
 				break
 			}
-
-			if err := channel.Mux.Send(channel.ID, buf[:n]); err != nil {
-				log.Printf("Channel %d: send error: %v", channel.ID, err)
+			if err := channel.Mux.Send(channel.Port, buf[:n]); err != nil {
+				alog.Error(alog.CatMux, "mux send error", "port", channel.Port, "error", err)
 				break
 			}
 		}
-
-		channel.Mux.CloseChannel(channel.ID)
+		channel.Mux.CloseChannel(channel.Port)
 	}()
 
+	// 隧道 → 用户
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("PANIC in handleChannel publicWrite goroutine: %v", r)
+				alog.Error(alog.CatMux, "handleChannel publicWrite panic", "error", r, "port", channel.Port)
 			}
+			publicConn.Close()
 			wg.Done()
 		}()
 		for {
@@ -217,14 +242,15 @@ func handleChannel(publicConn net.Conn, channel *mux.Channel, key string) {
 			if !ok {
 				break
 			}
-
 			if _, err := publicConn.Write(data); err != nil {
-				log.Printf("Channel %d: public write error: %v", channel.ID, err)
+				alog.Error(alog.CatMux, "public write error", "port", channel.Port, "error", err)
 				break
 			}
+			// 消费数据后发送窗口更新
+			channel.Mux.SendWindowUpdate(channel.Port, len(data))
 		}
 	}()
 
 	wg.Wait()
-	log.Printf("通道 %d 已关闭，key=%s", channel.ID, key)
+	alog.Info(alog.CatMux, "channel closed", "port", channel.Port, "key", key)
 }

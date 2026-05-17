@@ -3,7 +3,7 @@ package handler
 import (
 	"Aether/Aether_Server/manager"
 	"Aether/Aether_Server/register"
-	"log"
+	alog "Aether/common/log"
 	"net"
 	"net/http"
 	"strings"
@@ -29,7 +29,7 @@ func newUpgrader(domain string) *websocket.Upgrader {
 			if strings.HasPrefix(origin, "http://"+domain) {
 				return true
 			}
-			log.Printf("WebSocket 连接被拒绝: origin=%s", origin)
+			alog.Warn(alog.CatClient, "websocket connection rejected", "origin", origin)
 			return false
 		},
 		HandshakeTimeout: 10 * time.Second,
@@ -64,14 +64,14 @@ func (h *WSHandler) Handle(c *gin.Context) {
 	// 验证证书是否在注册表中且状态为 approved
 	record := h.registry.GetByClientID(clientID)
 	if record == nil || record.Status != "approved" {
-		log.Printf("客户端证书验证失败: %s (状态: %v)", clientID, record)
+		alog.Warn(alog.CatAuth, "client certificate verification failed", "client_id", clientID, "record", record)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "client certificate revoked or not approved"})
 		return
 	}
 
 	conn, err := newUpgrader(h.domain).Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		log.Printf("websocket upgrade error: %v", err)
+		alog.Error(alog.CatClient, "websocket upgrade error", "error", err)
 		return
 	}
 
