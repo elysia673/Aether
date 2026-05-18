@@ -5,9 +5,10 @@
 ## 特性
 
 - **多协议支持**: TCP、UDP、WebSocket 隧道模式
-- **多路复用**: 单连接多通道，减少连接开销
+- **TCP 隧道**: 参考 autossh 设计，每连接独立隧道，无多路复用开销，可靠性高
+- **WebSocket 多路复用**: 浏览器友好的 WS 隧道，单连接多通道
 - **自动重连**: 断线自动重连，隧道自动恢复
-- **心跳检测**: WebSocket ping/pong + TCP keepalive
+- **健康监测**: 实时检测客户端在线状态与网络延迟
 - **安全认证**: mTLS 客户端证书 + JWT Token + API Key 三重认证
 - **配置灵活**: JSON 配置文件 + 环境变量回退
 - **客户端中继**: 支持两个客户端之间通过服务器中继连接
@@ -75,11 +76,23 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### TCP 隧道流程
+
+```
+用户连接 :54001          服务端                    客户端
+    │                    │                          │
+    │──────────────────> │                          │
+    │                    │──tunnel_request(WS)────> │
+    │                    │                          │──连接 tunnel:9908 + token
+    │                    │<──ACK──────────────────  │
+    │                    │──配对──────────────────>  │
+    │<═══════════════════╪══════════════════════════>│  双向 io.Copy
+    │                    │                          │
+```
+
 ## 快速开始
 
 ### Docker 一键部署（推荐）
-
-#### 自签名证书
 
 ```bash
 # 构建镜像 + 生成证书和配置
@@ -87,42 +100,9 @@
 
 # 部署服务端
 ./docker/deploy.sh xxx.xxx.xxx.xxx
-```
 
-#### 本地证书
-
-```bash
-# 构建镜像 + 使用已有证书
-./docker/build-cert.sh xxx.xxx.xxx.xxx /path/to/cert.pem /path/to/key.pem
-
-# 部署服务端
-./docker/deploy-cert.sh xxx.xxx.xxx.xxx /path/to/cert.pem /path/to/key.pem
-```
-
-#### 部署客户端
-
-部署完成后，脚本会输出客户端部署命令，直接复制执行：
-
-```bash
+# 部署客户端（部署完成后，脚本会输出客户端部署命令）
 ./docker/deploy-client.sh wss://xxx.xxx.xxx.xxx:9909 "<client-token>" my-device
-```
-
-#### 本地证书
-
-```bash
-# 构建镜像 + 使用已有证书
-./build-cert.sh elysia.media /path/to/cert.pem /path/to/key.pem
-
-# 部署服务端
-./deploy-cert.sh elysia.media /path/to/cert.pem /path/to/key.pem
-```
-
-#### 部署客户端
-
-部署完成后，脚本会输出客户端部署命令，直接复制执行：
-
-```bash
-./deploy-client.sh wss://xxx.xxx.xxx.xxx:9909 "<client-token>" my-device
 ```
 
 首次部署需要注册客户端：
@@ -235,9 +215,9 @@ aether-cli create my-device -remote 3000 -local 3000 -protocol websocket
 # 登录
 aether-cli login -server https://xxx.xxx.xxx.xxx:9909 -api-key "your-api-key"
 
-# 客户端管理
-aether-cli clients                        # 列出客户端
-aether-cli info my-device                 # 查看代理信息
+# 客户端管理（含健康监测：在线状态 + 延迟）
+aether-cli clients                        # 列出客户端（状态/延迟/代理数）
+aether-cli info my-device                 # 查看代理详情
 
 # 代理管理
 aether-cli proxies                        # 列出所有代理
@@ -278,7 +258,7 @@ aether-cli -json clients                  # JSON 输出模式
 | `POST` | `/api/v1/register_add` | JWT | 审核通过并签发证书 |
 | `POST` | `/api/v1/register_delete` | JWT | 吊销客户端证书 |
 | `GET` | `/api/v1/register_apply_list` | JWT | 查看待审核列表 |
-| `GET` | `/api/v1/clients` | JWT | 列出所有客户端 |
+| `GET` | `/api/v1/clients` | JWT | 列出所有客户端（含在线状态/延迟） |
 | `GET` | `/api/v1/clients/:id/info` | JWT | 获取客户端代理信息 |
 | `POST` | `/api/v1/clients/:id/proxy` | JWT | 创建代理映射 |
 | `GET` | `/api/v1/proxies` | JWT | 列出所有代理 |
@@ -323,7 +303,7 @@ aether-cli -json clients                  # JSON 输出模式
 | 层级 | 机制 | 说明 |
 |------|------|------|
 | 传输层 | TLS 1.2+ | 所有通信加密 |
-| 客户端认证 | mTLS 客户端证书 | CA 签发，1年有效 |
+| 客户端认证 | mTLS 客户端证书 | CA 签发，10年有效 |
 | API 认证 | JWT Token | 启动时随机生成密钥，1年有效 |
 | 登录认证 | API Key | 常量时间比较，防时序攻击 |
 | 暴力防护 | Rate Limit | 登录 10次/分钟，API 60次/分钟 |
@@ -363,7 +343,21 @@ User        API Server       Client
   │<── {public_addr} ───────────│
 ```
 
-### 3. 客户端中继
+### 3. 公网连接
+
+```
+公网用户      服务端 :54001      服务端 :9908       客户端       本地服务
+  │              │                   │                │            │
+  │── TCP ──────>│                   │                │            │
+  │              │── tunnel_req ────>│                │            │
+  │              │                   │<── 认证 ───────│            │
+  │              │                   │── ACK ────────>│            │
+  │              │                   │── 配对 ───────>│            │
+  │<═════════════╪═══════════════════╪═══════════════╪═══════════>│
+  │              │         双向 io.Copy（零多路复用）               │
+```
+
+### 4. 客户端中继
 
 ```
 User           Server              Client A            Client B
@@ -390,14 +384,16 @@ User           Server              Client A            Client B
 └──────────┴──────────┴──────────────────┘
 ```
 
-### 多路复用帧协议
+### WebSocket 隧道帧协议
 
 ```
-┌──────────┬──────────┬──────────────────┐
-│  ChanID  │  Length  │      Data        │
-│  2 bytes │  2 bytes │   N bytes        │
-│  通道ID  │  N       │  传输数据        │
-└──────────┴──────────┴──────────────────┘
+┌──────────┬──────────┬──────────┬──────────┬──────────────────┐
+│  Magic   │   Port   │  Length  │   Type   │      Data        │
+│  2 bytes │  2 bytes │  2 bytes │  2 bytes │   N bytes        │
+│  0xAE01  │  端口号  │  N       │ 帧类型   │  传输数据        │
+└──────────┴──────────┴──────────┴──────────┴──────────────────┘
+
+帧类型: 0x0000=DATA, 0x0001=OPEN, 0x0002=CLOSE, 0x0003=WINDOW_UPDATE
 ```
 
 ## 项目结构
@@ -410,8 +406,11 @@ Aether/
 │   │   ├── api.go              # REST API
 │   │   ├── ws.go               # WebSocket 注册
 │   │   ├── tunnel_ws.go        # WebSocket 隧道
+│   │   ├── tunnel_listener.go  # TCP 隧道监听
 │   │   ├── tcp_proxy.go        # TCP 代理
 │   │   ├── udp_proxy.go        # UDP 代理
+│   │   ├── channel.go          # WS 隧道数据通道
+│   │   ├── proxy.go            # 代理 CRUD
 │   │   └── relay.go            # 客户端中继
 │   ├── manager/                # 连接管理
 │   ├── middleware/             # 中间件 (JWT, Auth, RateLimit)
@@ -427,14 +426,13 @@ Aether/
 ├── common/                     # 共享代码
 │   ├── config/                 # 配置管理
 │   ├── model/                  # 数据模型
-│   ├── mux/                    # 多路复用
+│   ├── mux/                    # 多路复用 (WebSocket 隧道用)
 │   └── wsconn/                 # WebSocket 适配
 └── docker/                     # Docker 构建与部署
     ├── Dockerfile              # 服务端镜像
     ├── Dockerfile.client       # 客户端镜像
     ├── build.sh                # 构建脚本 (自签名证书)
     ├── build-cert.sh           # 构建脚本 (本地证书)
-    ├── build2.sh               # 多平台构建脚本
     ├── deploy.sh               # 部署脚本 (自签名证书)
     ├── deploy-cert.sh          # 部署脚本 (本地证书)
     └── deploy-client.sh        # 客户端部署脚本

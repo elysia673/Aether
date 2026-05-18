@@ -369,15 +369,15 @@ func (c *Connection) Table() *ClientTable {
 }
 
 func (c *Connection) handlePong(data interface{}) {
-	// 类型断言：把 interface{} 类型的 data 转成 string。
 	ts, ok := data.(string)
 	if !ok {
+		alog.Debug(alog.CatClient, "pong data is not string", "clientID", c.clientID, "data", data)
 		return
 	}
 
-	// 解析 RFC3339Nano 格式的时间字符串
 	sentAt, err := time.Parse(time.RFC3339Nano, ts)
 	if err != nil {
+		alog.Debug(alog.CatClient, "pong timestamp parse failed", "clientID", c.clientID, "data", ts)
 		return
 	}
 	c.mu.Lock()

@@ -33,6 +33,7 @@ type ClientManager struct {
 	config          Config         // 管理器配置
 	portIndex       map[int]string // port -> clientID 索引
 	portIdxMu       sync.RWMutex   // 端口索引锁
+	stopChan        chan struct{}
 }
 
 // NewClientManager 创建客户端管理器
@@ -41,6 +42,7 @@ func NewClientManager(cfg Config) *ClientManager {
 	return &ClientManager{
 		config:    cfg,
 		portIndex: make(map[int]string),
+		stopChan:  make(chan struct{}),
 	}
 }
 
@@ -115,13 +117,17 @@ func (m *ClientManager) ListClients() []ClientInfo {
 		conn := table.Conn()
 		lat := conn.Latency()
 		online := time.Since(conn.LastPingAt()) < 2*m.config.PingInterval
+		latencyStr := "未知"
+		if lat > 0 {
+			latencyStr = lat.Truncate(time.Millisecond).String()
+		}
 		list = append(list, ClientInfo{
 			ID:          table.ClientID(),
 			RemoteAddr:  table.RemoteAddr(),
 			ConnectedAt: table.ConnectedAt(),
 			ProxyCount:  table.ProxyCount(),
 			Host:        table.Host(),
-			Latency:     lat.Truncate(time.Millisecond).String(),
+			Latency:     latencyStr,
 			Online:      online,
 		})
 		return true
@@ -295,10 +301,21 @@ func (m *ClientManager) RangeClients(fn func(clientID string, table *ClientTable
 	})
 }
 
+// StopHealthCheck 停止健康检查
+func (m *ClientManager) StopHealthCheck() {
+	select {
+	case <-m.stopChan:
+	default:
+		close(m.stopChan)
+	}
+}
+
 func (m *ClientManager) StartHealthCheck() {
 	go func() {
 		ticker := time.NewTicker(m.config.PingInterval)
-		for range ticker.C {
+		defer ticker.Stop()
+
+		sendPing := func() {
 			m.clients.Range(func(key, value any) bool {
 				table, ok := value.(*ClientTable)
 				if !ok {
@@ -306,15 +323,27 @@ func (m *ClientManager) StartHealthCheck() {
 				}
 				conn := table.Conn()
 				now := time.Now()
-				conn.mu.Lock()
-				conn.lastPingAt = now
-				conn.mu.Unlock()
-				conn.WriteJSON(&model.WSMessage{
+				err := conn.WriteJSON(&model.WSMessage{
 					Type: "ping",
 					Data: now.Format(time.RFC3339Nano),
 				})
+				if err == nil {
+					conn.mu.Lock()
+					conn.lastPingAt = now
+					conn.mu.Unlock()
+				}
 				return true
 			})
+		}
+
+		sendPing()
+		for {
+			select {
+			case <-m.stopChan:
+				return
+			case <-ticker.C:
+				sendPing()
+			}
 		}
 	}()
 }

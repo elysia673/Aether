@@ -380,6 +380,7 @@ func main() {
 
 	// 关闭 HTTP 服务器
 	server.Close()
+	clientMgr.StopHealthCheck()
 
 	// 关闭隧道监听器（defer 会执行）
 	alog.Info(alog.CatServer, "服务已停止")
